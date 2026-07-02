@@ -12,13 +12,6 @@ HNSW index with metadata and save/load, over [hnswlib](https://github.com/jelmer
 <a href="https://clojure.org"><img src="https://img.shields.io/badge/Clojure-5881D8?style=flat&logo=clojure&logoColor=fff" alt="Clojure" /></a>
 <a href="https://github.com/jelmerk/hnswlib"><img src="https://img.shields.io/badge/hnswlib-2D3748?style=flat" alt="hnswlib" /></a>
 
-Part of a local RAG substrate stack:
-[pdfplumber-clj](https://github.com/jsavyasachi/pdfplumber-clj) (extract) →
-[chunk-clj](https://github.com/jsavyasachi/chunk-clj) (split) →
-[tokenizers-clj](https://github.com/jsavyasachi/tokenizers-clj) (tokenize) →
-[embeddings-clj](https://github.com/jsavyasachi/embeddings-clj) (embed) →
-**vector-search-clj** (retrieve).
-
 ## Installation
 
 deps.edn:
@@ -74,9 +67,7 @@ Semantics worth knowing:
 - **Scores**: for `:cosine` and `:dot`, `:score` is a similarity (higher is
   better; cosine of an exact match ≈ 1.0). For `:euclidean` it is the L2
   distance (lower is better). Results are always ordered best-first.
-- **Vectors**: `float[]` (zero-copy, e.g. straight from
-  [embeddings-clj](https://github.com/jsavyasachi/embeddings-clj)) or any
-  sequential of numbers.
+- **Vectors**: `float[]` (zero-copy) or any sequential of numbers.
 - **Ids**: any EDN-round-trippable, `Serializable` value (strings, keywords,
   numbers, ...).
 - **`add!` with an existing id replaces** the stored vector and metadata.
