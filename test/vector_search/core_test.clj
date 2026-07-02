@@ -1,6 +1,8 @@
 (ns vector-search.core-test
   (:require [clojure.test :refer [deftest is]]
-            [vector-search.core :as vs]))
+            [vector-search.core :as vs])
+  (:import [java.io File]
+           [java.nio.file Files]))
 
 (set! *warn-on-reflection* true)
 
@@ -22,6 +24,29 @@
     nil
     (catch clojure.lang.ExceptionInfo e
       (ex-data e))))
+
+(defn delete-recursive!
+  [^File file]
+  (when (.exists file)
+    (doseq [^File f (reverse (file-seq file))]
+      (.delete f))))
+
+(defn temp-dir
+  ^File []
+  (.toFile (Files/createTempDirectory "vector-search-test-" (make-array java.nio.file.attribute.FileAttribute 0))))
+
+(defn comparable-results
+  [results]
+  (mapv #(update % :score double) results))
+
+(defn results-approx=
+  [expected actual]
+  (and (= (mapv :id expected) (mapv :id actual))
+       (= (mapv :metadata expected) (mapv :metadata actual))
+       (every? true?
+               (map approx=
+                    (map :score expected)
+                    (map :score actual)))))
 
 (defn dot
   ^double [xs ys]
@@ -163,3 +188,62 @@
           mean-recall (/ (reduce + recalls) (double (count recalls)))]
       (is (>= mean-recall 0.9)
           (str "mean recall@10 was " mean-recall)))))
+
+(deftest save-load-round-trips-index-and-metadata
+  (let [dir (temp-dir)]
+    (try
+      (let [idx (vs/index {:dim 3 :metric :cosine :capacity 4 :ef 25})
+            metadata {:label "alpha"
+                      :nested {:tags [:one :two]
+                               :settings {:enabled? true
+                                          :threshold 0.75}}}]
+        (vs/add! idx :alpha [1.0 0.0 0.0] metadata)
+        (vs/add! idx :beta [0.8 0.2 0.0] {:label "beta"})
+        (vs/add! idx :gamma [0.0 1.0 0.0] {:label "gamma"})
+        (let [before (comparable-results (vs/search idx [1.0 0.0 0.0] 3))]
+          (is (= dir (vs/save idx dir)))
+          (let [loaded (vs/load-index dir)
+                after (comparable-results (vs/search loaded [1.0 0.0 0.0] 3))]
+            (is (results-approx= before after))
+            (is (= metadata (:metadata (vs/get-item loaded :alpha))))
+            (is (= 3 (vs/size loaded))))))
+      (finally
+        (delete-recursive! dir)))))
+
+(deftest loaded-index-can-be-mutated
+  (let [dir (temp-dir)]
+    (try
+      (let [idx (vs/index {:dim 2 :capacity 2})]
+        (vs/add! idx :a [1.0 0.0] {:n 1})
+        (vs/add! idx :b [0.0 1.0] {:n 2})
+        (vs/save idx dir)
+        (let [loaded (vs/load-index dir)]
+          (vs/add! loaded :c [0.9 0.1] {:n 3})
+          (is (true? (vs/remove! loaded :b)))
+          (is (= 2 (vs/size loaded)))
+          (is (= [:a :c] (mapv :id (vs/search loaded [1.0 0.0] 10))))
+          (is (= {:n 3} (:metadata (vs/get-item loaded :c))))))
+      (finally
+        (delete-recursive! dir)))))
+
+(deftest load-index-reports-missing-index-files
+  (let [dir (temp-dir)]
+    (try
+      (delete-recursive! dir)
+      (is (= {:vector-search/error :index-not-found
+              :path (.getPath dir)}
+             (ex-data-for #(vs/load-index dir))))
+      (finally
+        (delete-recursive! dir)))))
+
+(deftest save-overwrites-existing-directory
+  (let [dir (temp-dir)]
+    (try
+      (let [idx (vs/index {:dim 2 :capacity 4})]
+        (vs/add! idx :a [1.0 0.0])
+        (vs/save idx dir)
+        (vs/add! idx :b [0.0 1.0])
+        (vs/save idx dir)
+        (is (= 2 (vs/size (vs/load-index dir)))))
+      (finally
+        (delete-recursive! dir)))))

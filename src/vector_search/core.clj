@@ -1,7 +1,9 @@
 (ns vector-search.core
+  (:require [clojure.edn :as edn]
+            [clojure.java.io :as io])
   (:import [com.github.jelmerk.hnswlib.core DistanceFunction DistanceFunctions Item SearchResult]
            [com.github.jelmerk.hnswlib.core.hnsw HnswIndex]
-           [java.io Serializable]
+           [java.io File FileOutputStream Serializable]
            [java.util Optional]))
 
 (set! *warn-on-reflection* true)
@@ -12,6 +14,9 @@
   (vector [_] vec)
   (dimensions [_] (alength vec))
   Serializable)
+
+(def ^:private vitem-class
+  (class (VItem. nil (float-array 0))))
 
 (def ^:private default-opts
   {:metric :cosine
@@ -180,3 +185,45 @@
   "Returns the number of indexed items."
   ^long [idx]
   (.size ^HnswIndex (:index idx)))
+
+(defn- path-file
+  ^File [path]
+  (io/file path))
+
+(defn- missing-index!
+  [^File dir]
+  (throw (ex-info "Vector search index files not found"
+                  {:vector-search/error :index-not-found
+                   :path (.getPath dir)})))
+
+(defn save
+  "Persists idx into path, a directory created when absent. Returns path."
+  [idx path]
+  (let [dir (path-file path)
+        index-file (io/file dir "index.bin")
+        meta-file (io/file dir "meta.edn")]
+    (.mkdirs dir)
+    (with-open [out (FileOutputStream. ^File index-file)]
+      (.save ^HnswIndex (:index idx) out))
+    (spit meta-file
+          (pr-str {:opts (:opts idx)
+                   :capacity @(:capacity idx)
+                   :metadata @(:metadata idx)}))
+    path))
+
+(defn load-index
+  "Loads an index handle from path, a directory containing index.bin and meta.edn."
+  [path]
+  (let [dir (path-file path)
+        index-file (io/file dir "index.bin")
+        meta-file (io/file dir "meta.edn")]
+    (when-not (and (.isFile ^File index-file) (.isFile ^File meta-file))
+      (missing-index! dir))
+    (let [loader (.getClassLoader ^Class vitem-class)
+          hnsw (HnswIndex/load ^File index-file ^ClassLoader loader)
+          {:keys [opts capacity metadata]} (edn/read-string (slurp meta-file))]
+      {:index hnsw
+       :opts opts
+       :metadata (atom metadata)
+       :capacity (atom capacity)
+       :lock (Object.)})))
