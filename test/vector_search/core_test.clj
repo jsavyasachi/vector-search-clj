@@ -1,5 +1,5 @@
 (ns vector-search.core-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.test :refer [deftest is testing]]
             [vector-search.core :as vs])
   (:import [java.io File]
            [java.nio.file Files]))
@@ -247,3 +247,24 @@
         (is (= 2 (vs/size (vs/load-index dir)))))
       (finally
         (delete-recursive! dir)))))
+
+(deftest filtered-search
+  (let [idx (vs/index {:dim 2 :metric :cosine :capacity 100})]
+    (doseq [i (range 20)]
+      (vs/add! idx i [(Math/cos (* 0.05 i)) (Math/sin (* 0.05 i))]
+               {:group (if (even? i) :a :b)}))
+    (testing "filter predicate restricts results and still returns k best-first"
+      (let [res (vs/search idx [1.0 0.0] 5 {:filter #(= :a (get-in % [:metadata :group]))})]
+        (is (= 5 (count res)))
+        (is (every? #(= :a (get-in % [:metadata :group])) res))
+        (is (= [0 2 4 6 8] (mapv :id res)))
+        (is (apply >= (map :score res)))))
+    (testing "filter that matches nothing returns empty"
+      (is (= [] (vs/search idx [1.0 0.0] 3 {:filter (constantly false)}))))
+    (testing "fewer matches than k returns all matches"
+      (let [res (vs/search idx [1.0 0.0] 50 {:filter #(= :b (get-in % [:metadata :group]))})]
+        (is (= 10 (count res)))))
+    (testing "no opts arg behaves as before"
+      (is (= 3 (count (vs/search idx [1.0 0.0] 3)))))
+    (testing "empty opts map behaves as unfiltered"
+      (is (= 3 (count (vs/search idx [1.0 0.0] 3 {})))))))

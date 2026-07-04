@@ -17,13 +17,13 @@ HNSW index with metadata and save/load, over [hnswlib](https://github.com/jelmer
 deps.edn:
 
 ```clojure
-net.clojars.savya/vector-search-clj {:mvn/version "0.1.0"}
+net.clojars.savya/vector-search-clj {:mvn/version "0.2.0"}
 ```
 
 Leiningen:
 
 ```clojure
-[net.clojars.savya/vector-search-clj "0.1.0"]
+[net.clojars.savya/vector-search-clj "0.2.0"]
 ```
 
 Pure JVM - no native dependencies, no server.
@@ -61,6 +61,16 @@ Options to `index` (defaults shown):
 | `:m` | `16` | HNSW graph degree |
 | `:ef-construction` | `200` | build-time search breadth |
 | `:ef` | `50` | query-time search breadth; higher = better recall, slower |
+
+Filtered search takes a predicate over the result map:
+
+```clojure
+(vs/search idx query 5 {:filter #(= :report (get-in % [:metadata :kind]))})
+```
+
+Filtering over-fetches candidates and doubles the candidate set (up to the
+whole index) until `k` matches are found - a highly selective filter on a
+large index costs proportionally more.
 
 Semantics worth knowing:
 
