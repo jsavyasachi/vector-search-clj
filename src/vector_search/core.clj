@@ -147,19 +147,42 @@
      :score (raw-score (get-in idx [:opts :metric]) (.distance result))
      :metadata (get @(:metadata idx) id)}))
 
+(defn- raw-search
+  [idx ^floats query candidate-count]
+  (mapv #(result-map idx %)
+        (.findNearest ^HnswIndex (:index idx) query (int candidate-count))))
+
 (defn search
   "Returns nearest results best-first.
 
   For :cosine and :dot, :score is a similarity where higher is better. For
-  :euclidean, :score is L2 distance where lower is better."
-  [idx query-vec k]
-  (let [^floats query (checked-vector idx query-vec)
-        item-count (.size ^HnswIndex (:index idx))
-        candidate-count (min (long k) item-count)]
-    (if (zero? candidate-count)
-      []
-      (mapv #(result-map idx %)
-            (.findNearest ^HnswIndex (:index idx) query (int candidate-count))))))
+  :euclidean, :score is L2 distance where lower is better.
+
+  With opts, `:filter` is a predicate over the result map
+  (`{:id .. :score .. :metadata ..}`); only results satisfying it are
+  returned, still k best-first. Filtering is implemented by over-fetching
+  candidates from the index and growing the candidate set (doubling, up to
+  the full index) until k matches are found, so a highly selective filter
+  on a large index costs proportionally more."
+  ([idx query-vec k]
+   (search idx query-vec k nil))
+  ([idx query-vec k {:keys [filter] :as _opts}]
+   (let [^floats query (checked-vector idx query-vec)
+         item-count (.size ^HnswIndex (:index idx))
+         k (long k)]
+     (cond
+       (zero? (min k item-count)) []
+
+       (nil? filter)
+       (raw-search idx query (min k item-count))
+
+       :else
+       (loop [n (min item-count (max (* 2 k) 32))]
+         (let [hits (into [] (comp (clojure.core/filter filter) (take k))
+                          (raw-search idx query n))]
+           (if (or (= (count hits) k) (>= n item-count))
+             hits
+             (recur (min item-count (* 2 n))))))))))
 
 (defn remove!
   "Removes id from the index. Returns true when an item was removed."
