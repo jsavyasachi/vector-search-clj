@@ -1,7 +1,8 @@
 (ns vector-search.core
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io])
-  (:import [com.github.jelmerk.hnswlib.core DistanceFunction DistanceFunctions Item SearchResult]
+  (:import [com.github.jelmerk.hnswlib.core DistanceFunction DistanceFunctions Index Item SearchResult]
+           [com.github.jelmerk.hnswlib.core.bruteforce BruteForceIndex]
            [com.github.jelmerk.hnswlib.core.hnsw HnswIndex]
            [java.io File FileOutputStream Serializable]
            [java.util Optional]))
@@ -18,12 +19,20 @@
 (def ^:private vitem-class
   (class (VItem. nil (float-array 0))))
 
-(def ^:private default-opts
-  {:metric :cosine
+(def ^:private default-hnsw-opts
+  {:type :hnsw
+   :metric :cosine
    :capacity 10000
    :m 16
    :ef-construction 200
    :ef 50})
+
+(def ^:private default-exact-opts
+  {:type :exact
+   :metric :cosine})
+
+(def ^:private hnsw-only-opts
+  #{:m :ef-construction :ef})
 
 (def ^:private float-array-class
   (Class/forName "[F"))
@@ -38,7 +47,31 @@
                     {:vector-search/error :unknown-metric
                      :metric metric}))))
 
-(defn- build-index
+(defn- invalid-option!
+  [type option]
+  (throw (ex-info "Invalid vector-search option"
+                  {:vector-search/error :invalid-option
+                   :type type
+                   :option option})))
+
+(defn- validate-exact-index-opts!
+  [opts]
+  (doseq [option hnsw-only-opts]
+    (when (contains? opts option)
+      (invalid-option! :exact option))))
+
+(defn- normalize-opts
+  [opts]
+  (case (get opts :type :hnsw)
+    :hnsw (merge default-hnsw-opts opts)
+    :exact (do
+             (validate-exact-index-opts! opts)
+             (merge default-exact-opts opts))
+    (throw (ex-info "Unknown vector-search index type"
+                    {:vector-search/error :unknown-index-type
+                     :type (:type opts)}))))
+
+(defn- build-hnsw-index
   ^HnswIndex [{:keys [dim metric capacity m ef-construction ef]}]
   (-> (doto (HnswIndex/newBuilder (int dim) (metric-distance-fn metric) (int capacity))
         (.withM (int m))
@@ -47,15 +80,29 @@
         (.withRemoveEnabled))
       (.build)))
 
-(defn index
-  "Creates an embedded HNSW vector index handle.
+(defn- build-exact-index
+  ^BruteForceIndex [{:keys [dim metric]}]
+  (-> (BruteForceIndex/newBuilder (int dim) (metric-distance-fn metric))
+      (.build)))
 
+(defn- build-index
+  ^Index [{:keys [type] :as opts}]
+  (case type
+    :hnsw (build-hnsw-index opts)
+    :exact (build-exact-index opts)))
+
+(defn index
+  "Creates an embedded vector index handle.
+
+  :type is :hnsw by default. :exact uses exhaustive exact search, O(n) per
+  query, with no tuning knobs; it is useful as ground truth or for small
+  corpora.
   :ef trades recall for speed during search; higher values improve recall."
   [opts]
   (when-not (:dim opts)
     (throw (ex-info "Missing vector dimension"
                     {:vector-search/error :missing-dim})))
-  (let [merged (merge default-opts opts)]
+  (let [merged (normalize-opts opts)]
     {:index (build-index merged)
      :opts merged
      :metadata (atom {})
@@ -84,7 +131,7 @@
 
 (defn- get-optional
   ^Optional [idx id]
-  (.get ^HnswIndex (:index idx) id))
+  (.get ^Index (:index idx) id))
 
 (defn- optional-item
   ^VItem [^Optional optional]
@@ -93,13 +140,14 @@
 
 (defn- grow-if-full!
   [idx]
-  (let [^HnswIndex hnsw (:index idx)
-        capacity-ref (:capacity idx)
-        capacity (long @capacity-ref)]
-    (when (>= (.size hnsw) capacity)
-      (let [new-capacity (* 2 capacity)]
-        (.resize hnsw (int new-capacity))
-        (reset! capacity-ref new-capacity)))))
+  (when (= :hnsw (get-in idx [:opts :type]))
+    (let [^HnswIndex hnsw (:index idx)
+          capacity-ref (:capacity idx)
+          capacity (long @capacity-ref)]
+      (when (>= (.size hnsw) capacity)
+        (let [new-capacity (* 2 capacity)]
+          (.resize hnsw (int new-capacity))
+          (reset! capacity-ref new-capacity))))))
 
 (defn add!
   "Adds or replaces id with vector v. Metadata is stored outside hnswlib."
@@ -110,11 +158,11 @@
          item (VItem. id vector)]
      (locking (:lock idx)
        (let [existing (optional-item (get-optional idx id))
-             ^HnswIndex hnsw (:index idx)]
+             ^Index index (:index idx)]
          (when existing
-           (.remove hnsw id (.version ^VItem existing)))
+           (.remove index id (.version ^VItem existing)))
          (grow-if-full! idx)
-         (.add hnsw item)
+         (.add index item)
          (if (nil? metadata)
            (swap! (:metadata idx) dissoc id)
            (swap! (:metadata idx) assoc id metadata))))
@@ -150,7 +198,7 @@
 (defn- raw-search
   [idx ^floats query candidate-count]
   (mapv #(result-map idx %)
-        (.findNearest ^HnswIndex (:index idx) query (int candidate-count))))
+        (.findNearest ^Index (:index idx) query (int candidate-count))))
 
 (defn search
   "Returns nearest results best-first.
@@ -163,12 +211,15 @@
   returned, still k best-first. Filtering is implemented by over-fetching
   candidates from the index and growing the candidate set (doubling, up to
   the full index) until k matches are found, so a highly selective filter
-  on a large index costs proportionally more."
+  on a large index costs proportionally more. Exact indexes fetch the full
+  index size when filtering because exact search is already exhaustive."
   ([idx query-vec k]
    (search idx query-vec k nil))
-  ([idx query-vec k {:keys [filter] :as _opts}]
+  ([idx query-vec k {:keys [filter] :as opts}]
+   (when (and (= :exact (get-in idx [:opts :type])) (contains? opts :ef))
+     (invalid-option! :exact :ef))
    (let [^floats query (checked-vector idx query-vec)
-         item-count (.size ^HnswIndex (:index idx))
+         item-count (.size ^Index (:index idx))
          k (long k)]
      (cond
        (zero? (min k item-count)) []
@@ -177,7 +228,9 @@
        (raw-search idx query (min k item-count))
 
        :else
-       (loop [n (min item-count (max (* 2 k) 32))]
+       (loop [n (if (= :exact (get-in idx [:opts :type]))
+                  item-count
+                  (min item-count (max (* 2 k) 32)))]
          (let [hits (into [] (comp (clojure.core/filter filter) (take k))
                           (raw-search idx query n))]
            (if (or (= (count hits) k) (>= n item-count))
@@ -189,7 +242,7 @@
   [idx id]
   (locking (:lock idx)
     (if-let [existing (optional-item (get-optional idx id))]
-      (let [removed? (.remove ^HnswIndex (:index idx) id (.version ^VItem existing))]
+      (let [removed? (.remove ^Index (:index idx) id (.version ^VItem existing))]
         (when removed?
           (swap! (:metadata idx) dissoc id))
         removed?)
@@ -207,7 +260,7 @@
 (defn size
   "Returns the number of indexed items."
   ^long [idx]
-  (.size ^HnswIndex (:index idx)))
+  (.size ^Index (:index idx)))
 
 (defn- path-file
   ^File [path]
@@ -227,7 +280,7 @@
         meta-file (io/file dir "meta.edn")]
     (.mkdirs dir)
     (with-open [out (FileOutputStream. ^File index-file)]
-      (.save ^HnswIndex (:index idx) out))
+      (.save ^Index (:index idx) out))
     (spit meta-file
           (pr-str {:opts (:opts idx)
                    :capacity @(:capacity idx)
@@ -235,7 +288,11 @@
     path))
 
 (defn load-index
-  "Loads an index handle from path, a directory containing index.bin and meta.edn."
+  "Loads an index handle from path, a directory containing index.bin and meta.edn.
+
+  :type in meta.edn selects :hnsw or :exact. Legacy saves without :type load as
+  :hnsw. :exact uses exhaustive exact search, O(n) per query, with no tuning
+  knobs; it is useful as ground truth or for small corpora."
   [path]
   (let [dir (path-file path)
         index-file (io/file dir "index.bin")
@@ -243,10 +300,16 @@
     (when-not (and (.isFile ^File index-file) (.isFile ^File meta-file))
       (missing-index! dir))
     (let [loader (.getClassLoader ^Class vitem-class)
-          hnsw (HnswIndex/load ^File index-file ^ClassLoader loader)
-          {:keys [opts capacity metadata]} (edn/read-string (slurp meta-file))]
-      {:index hnsw
-       :opts opts
+          {:keys [opts capacity metadata]} (edn/read-string (slurp meta-file))
+          type (get opts :type :hnsw)
+          loaded (case type
+                   :hnsw (HnswIndex/load ^File index-file ^ClassLoader loader)
+                   :exact (BruteForceIndex/load ^File index-file ^ClassLoader loader)
+                   (throw (ex-info "Unknown vector-search index type"
+                                   {:vector-search/error :unknown-index-type
+                                    :type type})))]
+      {:index loaded
+       :opts (assoc opts :type type)
        :metadata (atom metadata)
        :capacity (atom capacity)
        :lock (Object.)})))

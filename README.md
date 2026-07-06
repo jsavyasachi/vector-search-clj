@@ -17,13 +17,13 @@ HNSW index with metadata and save/load, over [hnswlib](https://github.com/jelmer
 deps.edn:
 
 ```clojure
-net.clojars.savya/vector-search-clj {:mvn/version "0.2.0"}
+net.clojars.savya/vector-search-clj {:mvn/version "0.3.0"}
 ```
 
 Leiningen:
 
 ```clojure
-[net.clojars.savya/vector-search-clj "0.2.0"]
+[net.clojars.savya/vector-search-clj "0.3.0"]
 ```
 
 Pure JVM - no native dependencies, no server.
@@ -56,11 +56,23 @@ Options to `index` (defaults shown):
 | option | default | meaning |
 |---|---|---|
 | `:dim` | required | vector dimensionality |
+| `:type` | `:hnsw` | `:hnsw` (approximate) or `:exact` (exhaustive brute force) |
 | `:metric` | `:cosine` | `:cosine`, `:dot`, or `:euclidean` |
-| `:capacity` | `10000` | initial max items; grows automatically when full |
+| `:capacity` | `10000` | initial max items; grows automatically when full (`:hnsw` only) |
 | `:m` | `16` | HNSW graph degree |
 | `:ef-construction` | `200` | build-time search breadth |
 | `:ef` | `50` | query-time search breadth; higher = better recall, slower |
+
+`:exact` builds a brute-force index: exhaustive exact search, O(n) per query,
+no capacity or tuning knobs (passing `:m`, `:ef-construction`, or `:ef` with
+`:exact` throws `:invalid-option`). Useful as ground truth for recall testing
+or for small corpora. The rest of the API - including `:filter`, metadata,
+and `save`/`load-index` - behaves identically; `meta.edn` records the index
+type, and legacy saves load as `:hnsw`.
+
+```clojure
+(def exact (vs/index {:dim 384 :type :exact}))
+```
 
 Filtered search takes a predicate over the result map:
 
@@ -82,11 +94,12 @@ Semantics worth knowing:
   numbers, ...).
 - **`add!` with an existing id replaces** the stored vector and metadata.
 - **HNSW is approximate**: recall is tuned by `:ef` (the seeded test suite
-  holds recall@10 ≈ 0.99 on defaults).
+  holds recall@10 ≈ 0.99 on defaults, measured against an `:exact` index as
+  ground truth).
 
 Errors are `ex-info` maps keyed `:vector-search/error`
-(`:missing-dim`, `:unknown-metric`, `:dim-mismatch`, `:invalid-vector`,
-`:index-not-found`).
+(`:missing-dim`, `:unknown-metric`, `:unknown-index-type`, `:invalid-option`,
+`:dim-mismatch`, `:invalid-vector`, `:index-not-found`).
 
 ## Running tests
 

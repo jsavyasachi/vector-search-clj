@@ -165,6 +165,31 @@
     (is (every? some? (map #(vs/get-item idx %) (range 10))))
     (is (= 9 (:id (first (vs/search idx [9.0 1.0] 1)))))))
 
+(deftest exact-search-returns-nearest-neighbors
+  (testing "cosine"
+    (let [idx (vs/index {:type :exact :dim 2 :metric :cosine})]
+      (vs/add-batch! idx [{:id :x :vector [1.0 0.0] :metadata {:label "x"}}
+                          {:id :near :vector [0.8 0.6] :metadata {:label "near"}}
+                          {:id :orthogonal :vector [0.0 1.0] :metadata {:label "orthogonal"}}
+                          {:id :opposite :vector [-1.0 0.0] :metadata {:label "opposite"}}])
+      (let [results (vs/search idx [1.0 0.0] 4)]
+        (is (= [:x :near :orthogonal :opposite] (mapv :id results)))
+        (is (= {:label "near"} (:metadata (second results))))
+        (is (approx= 1.0 (:score (first results))))
+        (is (approx= 0.8 (:score (second results))))
+        (is (approx= 0.0 (:score (nth results 2))))
+        (is (approx= -1.0 (:score (nth results 3)))))))
+  (testing "euclidean"
+    (let [idx (vs/index {:type :exact :dim 2 :metric :euclidean})]
+      (vs/add-batch! idx [{:id :origin :vector [0.0 0.0]}
+                          {:id :one-one :vector [1.0 1.0]}
+                          {:id :three-four :vector [3.0 4.0]}])
+      (let [results (vs/search idx [0.0 0.0] 3)]
+        (is (= [:origin :one-one :three-four] (mapv :id results)))
+        (is (approx= 0.0 (:score (first results))))
+        (is (approx= (Math/sqrt 2.0) (:score (second results))))
+        (is (approx= 5.0 (:score (nth results 2))))))))
+
 (deftest seeded-cosine-recall-smoke
   (let [rng (java.util.Random. 42)
         dim 32
@@ -189,6 +214,42 @@
       (is (>= mean-recall 0.9)
           (str "mean recall@10 was " mean-recall)))))
 
+(deftest hnsw-recall-matches-exact-ground-truth
+  (let [rng (java.util.Random. 42)
+        dim 32
+        total 1000
+        k 10
+        hnsw (vs/index {:type :hnsw :dim dim :metric :cosine :capacity total})
+        exact (vs/index {:type :exact :dim dim :metric :cosine})
+        random-vector (fn []
+                        (vec (repeatedly dim
+                                         #(- (* 2.0 (.nextDouble ^java.util.Random rng)) 1.0))))
+        items (vec (for [id (range total)]
+                     {:id id :vector (random-vector)}))]
+    (vs/add-batch! hnsw items)
+    (vs/add-batch! exact items)
+    (let [queries (vec (repeatedly 20 random-vector))
+          recalls (for [query queries
+                        :let [expected (map :id (vs/search exact query k))
+                              actual (map :id (vs/search hnsw query k))]]
+                    (recall-at expected actual k))
+          mean-recall (/ (reduce + recalls) (double (count recalls)))]
+      (is (>= mean-recall 0.9)
+          (str "mean recall@10 was " mean-recall)))))
+
+(deftest exact-rejects-hnsw-only-options
+  (doseq [option [:m :ef-construction :ef]]
+    (is (= {:vector-search/error :invalid-option
+            :type :exact
+            :option option}
+           (ex-data-for #(vs/index (assoc {:type :exact :dim 2} option 10))))))
+  (let [idx (vs/index {:type :exact :dim 2})]
+    (vs/add! idx :x [1.0 0.0])
+    (is (= {:vector-search/error :invalid-option
+            :type :exact
+            :option :ef}
+           (ex-data-for #(vs/search idx [1.0 0.0] 1 {:ef 10}))))))
+
 (deftest save-load-round-trips-index-and-metadata
   (let [dir (temp-dir)]
     (try
@@ -207,6 +268,43 @@
             (is (results-approx= before after))
             (is (= metadata (:metadata (vs/get-item loaded :alpha))))
             (is (= 3 (vs/size loaded))))))
+      (finally
+        (delete-recursive! dir)))))
+
+(deftest exact-save-load-round-trips-index-and-metadata
+  (let [dir (temp-dir)]
+    (try
+      (let [idx (vs/index {:type :exact :dim 3 :metric :cosine})
+            metadata {:label "alpha"
+                      :nested {:tags [:one :two]}}]
+        (vs/add! idx :alpha [1.0 0.0 0.0] metadata)
+        (vs/add! idx :beta [0.8 0.2 0.0] {:label "beta"})
+        (vs/add! idx :gamma [0.0 1.0 0.0] {:label "gamma"})
+        (let [before (comparable-results (vs/search idx [1.0 0.0 0.0] 3))]
+          (is (= dir (vs/save idx dir)))
+          (let [loaded (vs/load-index dir)
+                after (comparable-results (vs/search loaded [1.0 0.0 0.0] 3))]
+            (is (= :exact (get-in loaded [:opts :type])))
+            (is (results-approx= before after))
+            (is (= metadata (:metadata (vs/get-item loaded :alpha))))
+            (is (= 3 (vs/size loaded))))))
+      (finally
+        (delete-recursive! dir)))))
+
+(deftest legacy-save-without-type-loads-as-hnsw
+  (let [dir (temp-dir)]
+    (try
+      (let [idx (vs/index {:dim 2 :metric :cosine :capacity 4})]
+        (vs/add! idx :a [1.0 0.0] {:label "a"})
+        (vs/add! idx :b [0.0 1.0] {:label "b"})
+        (vs/save idx dir)
+        (let [meta-file (File. dir "meta.edn")
+              meta (read-string (slurp meta-file))]
+          (spit meta-file (pr-str (update meta :opts dissoc :type))))
+        (let [loaded (vs/load-index dir)]
+          (is (= :hnsw (get-in loaded [:opts :type])))
+          (is (= [:a :b] (mapv :id (vs/search loaded [1.0 0.0] 2))))
+          (is (= {:label "a"} (:metadata (vs/get-item loaded :a))))))
       (finally
         (delete-recursive! dir)))))
 
@@ -268,3 +366,15 @@
       (is (= 3 (count (vs/search idx [1.0 0.0] 3)))))
     (testing "empty opts map behaves as unfiltered"
       (is (= 3 (count (vs/search idx [1.0 0.0] 3 {})))))))
+
+(deftest exact-filtered-search
+  (let [idx (vs/index {:type :exact :dim 2 :metric :cosine})]
+    (doseq [i (range 20)]
+      (vs/add! idx i [(Math/cos (* 0.05 i)) (Math/sin (* 0.05 i))]
+               {:group (if (even? i) :a :b)}))
+    (let [res (vs/search idx [1.0 0.0] 5 {:filter #(= :a (get-in % [:metadata :group]))})]
+      (is (= 5 (count res)))
+      (is (every? #(= :a (get-in % [:metadata :group])) res))
+      (is (= [0 2 4 6 8] (mapv :id res)))
+      (is (apply >= (map :score res))))
+    (is (= [] (vs/search idx [1.0 0.0] 3 {:filter (constantly false)})))))
