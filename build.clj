@@ -8,7 +8,7 @@
             [deps-deploy.deps-deploy :as dd]))
 
 (def lib 'net.clojars.savya/vector-search-clj)
-(def version "0.3.0")
+(def version "0.3.1")
 (def class-dir "target/classes")
 (def basis (delay (b/create-basis {:project "deps.edn"})))
 (def jar-file (format "target/%s-%s.jar" (name lib) version))
@@ -24,8 +24,12 @@
                 :basis @basis
                 :src-dirs ["src"]
                 :scm {:url "https://github.com/jsavyasachi/vector-search-clj"
+                      :connection "scm:git:https://github.com/jsavyasachi/vector-search-clj.git"
+                      :developerConnection "scm:git:ssh://git@github.com/jsavyasachi/vector-search-clj.git"
                       :tag (str "v" version)}
-                :pom-data [[:licenses
+                :pom-data [[:description "Embedded approximate-nearest-neighbor vector search for Clojure: an in-process ANN index."]
+                           [:url "https://github.com/jsavyasachi/vector-search-clj"]
+                           [:licenses
                             [:license
                              [:name "Eclipse Public License 2.0"]
                              [:url "https://www.eclipse.org/legal/epl-2.0/"]
