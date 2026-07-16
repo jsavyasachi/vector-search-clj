@@ -410,3 +410,43 @@
         (vs/remove! idx :a)
         (is (= [] (bm25-search idx "gamma" 10))))
       (is false "bm25-search is not implemented"))))
+
+(deftest hybrid-search-fuses-dense-and-sparse-ranks
+  (let [idx (vs/index {:type :exact :dim 2 :metric :cosine})]
+    (vs/add-batch! idx [{:id :a :vector [1.0 0.0]
+                         :metadata {:label "dense"}
+                         :text "identifier padding padding"}
+                        {:id :b :vector [0.8 0.6]
+                         :metadata {:label "middle"}
+                         :text "general topic"}
+                        {:id :identifier :vector [0.0 1.0]
+                         :metadata {:label "exact term"}
+                         :text "identifier"}])
+    (if-let [hybrid-search (ns-resolve 'vector-search.core 'hybrid-search)]
+      (let [results (hybrid-search idx [1.0 0.0] "identifier" 3
+                                   {:candidate-count 3})]
+        (is (= [:a :identifier :b] (mapv :id results)))
+        (is (approx= (+ (/ 1.0 61.0) (/ 1.0 62.0))
+                     (:score (first results))))
+        (is (approx= (+ (/ 1.0 63.0) (/ 1.0 61.0))
+                     (:score (second results))))
+        (is (= {:label "exact term"} (:metadata (second results)))))
+      (is false "hybrid-search is not implemented"))))
+
+(deftest hybrid-weighted-fusion-normalizes-score-lists
+  (let [idx (vs/index {:type :exact :dim 2 :metric :cosine})]
+    (vs/add-batch! idx [{:id :a :vector [1.0 0.0]
+                         :text "identifier padding padding"}
+                        {:id :b :vector [0.8 0.6]
+                         :text "general topic"}
+                        {:id :identifier :vector [0.0 1.0]
+                         :text "identifier"}])
+    (if-let [hybrid-search (ns-resolve 'vector-search.core 'hybrid-search)]
+      (let [results (hybrid-search idx [1.0 0.0] "identifier" 3
+                                   {:fusion :weighted
+                                    :dense-weight 0.2
+                                    :sparse-weight 0.8
+                                    :candidate-count 3})]
+        (is (= :identifier (:id (first results))))
+        (is (approx= 0.8 (:score (first results)))))
+      (is false "hybrid-search is not implemented"))))

@@ -1,7 +1,8 @@
 (ns vector-search.core
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [vector-search.bm25 :as bm25])
+            [vector-search.bm25 :as bm25]
+            [vector-search.hybrid :as hybrid])
   (:import [com.github.jelmerk.hnswlib.core DistanceFunction DistanceFunctions Index Item SearchResult]
            [com.github.jelmerk.hnswlib.core.bruteforce BruteForceIndex]
            [com.github.jelmerk.hnswlib.core.hnsw HnswIndex]
@@ -258,6 +259,24 @@
            (if (or (= (count hits) k) (>= n item-count))
              hits
              (recur (min item-count (* 2 n))))))))))
+
+(defn hybrid-search
+  "Fuses dense vector and BM25 text retrieval into standard result maps.
+
+  The default `:fusion` is reciprocal rank fusion (`:rrf`) with `:rrf-k` 60.
+  `:fusion :weighted` min-max normalizes each score list and combines it with
+  `:dense-weight` and `:sparse-weight`, each defaulting to 0.5."
+  ([idx query-vec query-text k]
+   (hybrid-search idx query-vec query-text k nil))
+  ([idx query-vec query-text k opts]
+   (let [opts (or opts {})
+         candidate-count (min (.size ^Index (:index idx))
+                              (long (get opts :candidate-count (max k (* 4 k)))))
+         dense-results (search idx query-vec candidate-count)
+         sparse-results (bm25-search idx query-text candidate-count)]
+     (hybrid/fuse dense-results sparse-results k
+                  (assoc opts :dense-higher?
+                         (not= :euclidean (get-in idx [:opts :metric])))))))
 
 (defn remove!
   "Removes id from the index. Returns true when an item was removed."

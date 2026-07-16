@@ -48,6 +48,14 @@ Pure JVM - no native dependencies, no server.
 (vs/bm25-search idx "ZX-81 revenue" 10)
 ;; => [{:id "chunk-1" :score 1.31 :metadata {:source "report.pdf" :page 3}} ...]
 
+(vs/hybrid-search idx query-vec "ZX-81 revenue" 10)
+;; Reciprocal Rank Fusion by default; :score is the fused score.
+
+(vs/hybrid-search idx query-vec "ZX-81 revenue" 10
+                  {:fusion :weighted
+                   :dense-weight 0.4
+                   :sparse-weight 0.6})
+
 (vs/get-item idx "chunk-1")   ;; => {:id .. :vector float[] :metadata ..}
 (vs/remove! idx "chunk-1")    ;; => true
 (vs/size idx)                 ;; => 2
@@ -102,6 +110,11 @@ Semantics worth knowing:
   `add-batch!` item. Tokenization lowercases and splits on non-alphanumeric
   characters. `bm25-search` accepts optional `:k1` and `:b` values, defaulting
   to `1.2` and `0.75`.
+- **Hybrid retrieval**: `hybrid-search` fuses dense and BM25 candidates with
+  Reciprocal Rank Fusion by default (`:rrf-k` defaults to `60`). Set `:fusion`
+  to `:weighted` for min-max normalized score fusion; `:dense-weight` and
+  `:sparse-weight` each default to `0.5`. `:candidate-count` controls each
+  retrieval list's depth and defaults to four times the requested result count.
 - **`add!` with an existing id replaces** the stored vector and metadata.
 - **HNSW is approximate**: recall is tuned by `:ef` (the seeded test suite
   holds recall@10 ≈ 0.99 on defaults, measured against an `:exact` index as
