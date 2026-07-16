@@ -51,7 +51,7 @@
                         (+ doc-frequency 0.5)))))
 
 (defn search
-  [state query k {:keys [k1 b]
+  [state query k {:keys [k1 b ids]
                   :or {k1 default-k1 b default-b}}]
   (let [doc-count (count (:docs state))
         avg-length (if (pos? doc-count)
@@ -64,16 +64,18 @@
                         idf (inverse-document-frequency doc-count (count posting))]
                     (reduce-kv
                      (fn [doc-scores id frequency]
-                       (let [doc-length (get-in state [:docs id :length])
-                             length-ratio (if (pos? avg-length)
-                                            (/ doc-length avg-length)
-                                            0.0)
-                             denominator (+ frequency
-                                            (* k1 (+ (- 1.0 b)
-                                                     (* b length-ratio))))
-                             score (* idf (/ (* frequency (+ k1 1.0))
-                                             denominator))]
-                         (update doc-scores id (fnil + 0.0) score)))
+                       (if (and (some? ids) (not (contains? ids id)))
+                         doc-scores
+                         (let [doc-length (get-in state [:docs id :length])
+                               length-ratio (if (pos? avg-length)
+                                              (/ doc-length avg-length)
+                                              0.0)
+                               denominator (+ frequency
+                                              (* k1 (+ (- 1.0 b)
+                                                       (* b length-ratio))))
+                               score (* idf (/ (* frequency (+ k1 1.0))
+                                               denominator))]
+                           (update doc-scores id (fnil + 0.0) score))))
                      acc
                      posting)))
                 {}

@@ -2,6 +2,7 @@
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [vector-search.bm25 :as bm25]
+            [vector-search.filter :as metadata-filter]
             [vector-search.hybrid :as hybrid])
   (:import [com.github.jelmerk.hnswlib.core DistanceFunction DistanceFunctions Index Item SearchResult]
            [com.github.jelmerk.hnswlib.core.bruteforce BruteForceIndex]
@@ -108,6 +109,7 @@
     {:index (build-index merged)
      :opts merged
      :metadata (atom {})
+     :metadata-index (atom (metadata-filter/empty-index))
      :bm25 (atom (bm25/empty-index))
      :capacity (atom (:capacity merged))
      :lock (Object.)}))
@@ -165,6 +167,7 @@
          item (VItem. id vector)]
      (locking (:lock idx)
        (let [existing (optional-item (get-optional idx id))
+             old-metadata (get @(:metadata idx) id)
              ^Index index (:index idx)]
          (when existing
            (.remove index id (.version ^VItem existing)))
@@ -173,6 +176,10 @@
          (if (nil? metadata)
            (swap! (:metadata idx) dissoc id)
            (swap! (:metadata idx) assoc id metadata))
+         (swap! (:metadata-index idx)
+                #(-> %
+                     (metadata-filter/remove-item id old-metadata)
+                     (metadata-filter/add-item id metadata)))
          (swap! (:bm25 idx) bm25/remove-doc id)
          (when (some? text)
            (swap! (:bm25 idx) bm25/add-doc id text))))
@@ -223,19 +230,34 @@
   (mapv #(result-map idx %)
         (.findNearest ^Index (:index idx) query (int candidate-count))))
 
+(defn- candidate-search
+  [idx ^floats query candidate-ids k]
+  (let [metric (get-in idx [:opts :metric])
+        ^DistanceFunction distance-fn (metric-distance-fn metric)]
+    (->> candidate-ids
+         (keep (fn [id]
+                 (when-let [^VItem item (optional-item (get-optional idx id))]
+                   {:id id
+                    :score (raw-score metric
+                                      (.distance distance-fn query (.vector item)))
+                    :metadata (get @(:metadata idx) id)})))
+         (sort-by (if (= :euclidean metric)
+                    (fn [{:keys [id score]}] [score (pr-str id)])
+                    (fn [{:keys [id score]}] [(- score) (pr-str id)])))
+         (take k)
+         vec)))
+
 (defn search
   "Returns nearest results best-first.
 
   For :cosine and :dot, :score is a similarity where higher is better. For
   :euclidean, :score is L2 distance where lower is better.
 
-  With opts, `:filter` is a predicate over the result map
-  (`{:id .. :score .. :metadata ..}`); only results satisfying it are
-  returned, still k best-first. Filtering is implemented by over-fetching
-  candidates from the index and growing the candidate set (doubling, up to
-  the full index) until k matches are found, so a highly selective filter
-  on a large index costs proportionally more. Exact indexes fetch the full
-  index size when filtering because exact search is already exhaustive."
+  With opts, `:filter` can be a structured metadata filter (`:eq`, `:in`,
+  `:range`, `:gt`, `:lt`, `:and`, `:or`, or `:not`) or a predicate over the
+  result map. Structured equality and membership use an inverted metadata
+  index, then only matching vectors are scored. Predicate filtering retains
+  the original candidate over-fetching behavior."
   ([idx query-vec k]
    (search idx query-vec k nil))
   ([idx query-vec k {:keys [filter] :as opts}]
@@ -249,6 +271,13 @@
 
        (nil? filter)
        (raw-search idx query (min k item-count))
+
+       (map? filter)
+       (candidate-search idx query
+                         (metadata-filter/matching-ids @(:metadata-index idx)
+                                                       @(:metadata idx)
+                                                       filter)
+                         k)
 
        :else
        (loop [n (if (= :exact (get-in idx [:opts :type]))
@@ -270,10 +299,20 @@
    (hybrid-search idx query-vec query-text k nil))
   ([idx query-vec query-text k opts]
    (let [opts (or opts {})
+         filter (:filter opts)
+         filter-ids (when (map? filter)
+                      (metadata-filter/matching-ids @(:metadata-index idx)
+                                                    @(:metadata idx)
+                                                    filter))
          candidate-count (min (.size ^Index (:index idx))
                               (long (get opts :candidate-count (max k (* 4 k)))))
-         dense-results (search idx query-vec candidate-count)
-         sparse-results (bm25-search idx query-text candidate-count)]
+         dense-results (search idx query-vec candidate-count
+                               (when filter {:filter filter}))
+         sparse-results (bm25-search idx query-text candidate-count
+                                     (when filter-ids {:ids filter-ids}))
+         sparse-results (if (and filter (not (map? filter)))
+                          (into [] (clojure.core/filter filter) sparse-results)
+                          sparse-results)]
      (hybrid/fuse dense-results sparse-results k
                   (assoc opts :dense-higher?
                          (not= :euclidean (get-in idx [:opts :metric])))))))
@@ -285,6 +324,8 @@
     (if-let [existing (optional-item (get-optional idx id))]
       (let [removed? (.remove ^Index (:index idx) id (.version ^VItem existing))]
         (when removed?
+          (swap! (:metadata-index idx) metadata-filter/remove-item id
+                 (get @(:metadata idx) id))
           (swap! (:metadata idx) dissoc id)
           (swap! (:bm25 idx) bm25/remove-doc id))
         removed?)
@@ -327,6 +368,7 @@
           (pr-str {:opts (:opts idx)
                    :capacity @(:capacity idx)
                    :metadata @(:metadata idx)
+                   :metadata-index @(:metadata-index idx)
                    :bm25 @(:bm25 idx)}))
     path))
 
@@ -343,7 +385,8 @@
     (when-not (and (.isFile ^File index-file) (.isFile ^File meta-file))
       (missing-index! dir))
     (let [loader (.getClassLoader ^Class vitem-class)
-          {:keys [opts capacity metadata bm25]} (edn/read-string (slurp meta-file))
+          {:keys [opts capacity metadata metadata-index bm25]}
+          (edn/read-string (slurp meta-file))
           type (get opts :type :hnsw)
           loaded (case type
                    :hnsw (HnswIndex/load ^File index-file ^ClassLoader loader)
@@ -354,6 +397,8 @@
       {:index loaded
        :opts (assoc opts :type type)
        :metadata (atom metadata)
+       :metadata-index (atom (or metadata-index
+                                 (metadata-filter/from-metadata metadata)))
        :bm25 (atom (or bm25 (bm25/empty-index)))
        :capacity (atom capacity)
        :lock (Object.)})))

@@ -450,3 +450,61 @@
         (is (= :identifier (:id (first results))))
         (is (approx= 0.8 (:score (first results)))))
       (is false "hybrid-search is not implemented"))))
+
+(deftest structured-metadata-filter-dsl
+  (let [idx (vs/index {:type :exact :dim 2 :metric :cosine})]
+    (vs/add-batch! idx [{:id 1 :vector [1.0 0.0]
+                         :metadata {:kind :doc :year 2020 :region :us}}
+                        {:id 2 :vector [0.9 0.1]
+                         :metadata {:kind :doc :year 2023 :region :eu}}
+                        {:id 3 :vector [0.8 0.2]
+                         :metadata {:kind :note :year 2024 :region :us}}
+                        {:id 4 :vector [0.7 0.3]
+                         :metadata {:kind :note :year 2019 :region :apac}}])
+    (let [ids (fn [filter]
+                (set (map :id (vs/search idx [1.0 0.0] 10 {:filter filter}))))]
+      (is (= #{1 2} (ids {:eq [:kind :doc]})))
+      (is (= #{1 3} (ids {:in [:region #{:us :unknown}]})))
+      (is (= #{2 3} (ids {:range [:year 2021 2024]})))
+      (is (= #{2 3} (ids {:gt [:year 2020]})))
+      (is (= #{1 4} (ids {:lt [:year 2021]})))
+      (is (= #{2} (ids {:and [{:eq [:kind :doc]}
+                              {:range [:year 2021 2024]}]})))
+      (is (= #{2 4} (ids {:or [{:eq [:region :eu]}
+                               {:range [:year 2019 2019]}]})))
+      (is (= #{3 4} (ids {:not {:eq [:kind :doc]}})))
+      (is (= #{1 2} (get-in @(:metadata-index idx) [:terms :kind :doc]))))))
+
+(deftest structured-filter-updates-with-items-and-restricts-hybrid-search
+  (let [idx (vs/index {:dim 2 :metric :cosine :capacity 4})]
+    (vs/add-batch! idx [{:id :blocked :vector [1.0 0.0]
+                         :metadata {:allowed false}
+                         :text "identifier"}
+                        {:id :allowed :vector [0.0 1.0]
+                         :metadata {:allowed true}
+                         :text "identifier"}])
+    (is (= [:allowed]
+           (mapv :id (vs/hybrid-search idx [1.0 0.0] "identifier" 2
+                                      {:filter {:eq [:allowed true]}
+                                       :candidate-count 2}))))
+    (vs/add! idx :allowed [0.0 1.0] {:allowed false} "identifier")
+    (is (= #{} (or (get-in @(:metadata-index idx) [:terms :allowed true]) #{})))
+    (is (= [] (vs/search idx [1.0 0.0] 2 {:filter {:eq [:allowed true]}})))
+    (vs/remove! idx :blocked)
+    (is (= #{:allowed}
+           (get-in @(:metadata-index idx) [:terms :allowed false])))))
+
+(deftest sparse-and-metadata-indexes-round-trip
+  (let [dir (temp-dir)]
+    (try
+      (let [idx (vs/index {:type :exact :dim 2})]
+        (vs/add! idx :a [1.0 0.0] {:kind :kept} "unique token")
+        (vs/add! idx :b [0.0 1.0] {:kind :other} "other text")
+        (vs/save idx dir)
+        (let [loaded (vs/load-index dir)]
+          (is (= [:a] (mapv :id (vs/bm25-search loaded "unique" 10))))
+          (is (= [:a]
+                 (mapv :id (vs/search loaded [0.0 1.0] 10
+                                      {:filter {:eq [:kind :kept]}}))))))
+      (finally
+        (delete-recursive! dir)))))

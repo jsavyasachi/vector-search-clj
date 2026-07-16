@@ -88,15 +88,35 @@ type, and legacy saves load as `:hnsw`.
 (def exact (vs/index {:dim 384 :type :exact}))
 ```
 
-Filtered search takes a predicate over the result map:
+Filtered search accepts a structured metadata filter:
+
+```clojure
+(vs/search idx query 5 {:filter {:eq [:kind :report]}})
+(vs/search idx query 5 {:filter {:in [:status #{:draft :published}]}})
+(vs/search idx query 5 {:filter {:range [:page 3 10]}}) ; inclusive
+(vs/search idx query 5
+           {:filter {:and [{:eq [:kind :report]}
+                           {:not {:range [:page 1 2]}}]}})
+```
+
+The DSL operators are `{:eq [key value]}`, `{:in [key values]}`,
+`{:range [key low high]}` (inclusive), `{:gt [key bound]}`,
+`{:lt [key bound]}`, `{:and [filters...]}`, `{:or [filters...]}`, and
+`{:not filter}`. Keys address top-level metadata fields. Equality and
+membership use an inverted metadata index. Boolean expressions apply their
+range comparisons only to the candidates surviving indexed clauses, and the
+resolved IDs are scored directly instead of over-fetching the ANN index.
+`hybrid-search` accepts the same `:filter` option.
+
+The original arbitrary predicate form remains supported:
 
 ```clojure
 (vs/search idx query 5 {:filter #(= :report (get-in % [:metadata :kind]))})
 ```
 
-Filtering over-fetches candidates and doubles the candidate set (up to the
-whole index) until `k` matches are found - a highly selective filter on a
-large index costs proportionally more.
+Predicate filtering over-fetches candidates and doubles the candidate set (up
+to the whole index) until `k` matches are found. Use the structured DSL for
+indexed filtering.
 
 Semantics worth knowing:
 
