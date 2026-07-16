@@ -1,6 +1,7 @@
 (ns vector-search.core
   (:require [clojure.edn :as edn]
-            [clojure.java.io :as io])
+            [clojure.java.io :as io]
+            [vector-search.bm25 :as bm25])
   (:import [com.github.jelmerk.hnswlib.core DistanceFunction DistanceFunctions Index Item SearchResult]
            [com.github.jelmerk.hnswlib.core.bruteforce BruteForceIndex]
            [com.github.jelmerk.hnswlib.core.hnsw HnswIndex]
@@ -106,6 +107,7 @@
     {:index (build-index merged)
      :opts merged
      :metadata (atom {})
+     :bm25 (atom (bm25/empty-index))
      :capacity (atom (:capacity merged))
      :lock (Object.)}))
 
@@ -150,10 +152,14 @@
           (reset! capacity-ref new-capacity))))))
 
 (defn add!
-  "Adds or replaces id with vector v. Metadata is stored outside hnswlib."
+  "Adds or replaces id with vector v. Metadata is stored outside hnswlib.
+
+  The five-argument form optionally indexes text for BM25 retrieval."
   ([idx id v]
    (add! idx id v nil))
   ([idx id v metadata]
+   (add! idx id v metadata nil))
+  ([idx id v metadata text]
    (let [^floats vector (checked-vector idx v)
          item (VItem. id vector)]
      (locking (:lock idx)
@@ -165,19 +171,35 @@
          (.add index item)
          (if (nil? metadata)
            (swap! (:metadata idx) dissoc id)
-           (swap! (:metadata idx) assoc id metadata))))
+           (swap! (:metadata idx) assoc id metadata))
+         (swap! (:bm25 idx) bm25/remove-doc id)
+         (when (some? text)
+           (swap! (:bm25 idx) bm25/add-doc id text))))
      id)))
 
 (defn add-batch!
-  "Adds each {:id .. :vector .. :metadata ..} item and returns the count added."
+  "Adds each {:id .. :vector .. :metadata .. :text ..} item and returns the count added."
   [idx items]
-  (reduce (fn [n {:keys [id vector metadata] :as item}]
-            (if (contains? item :metadata)
-              (add! idx id vector metadata)
-              (add! idx id vector))
+  (reduce (fn [n {:keys [id vector metadata text] :as item}]
+            (cond
+              (contains? item :text) (add! idx id vector metadata text)
+              (contains? item :metadata) (add! idx id vector metadata)
+              :else (add! idx id vector))
             (inc n))
           0
           items))
+
+(defn bm25-search
+  "Returns BM25 text matches best-first in the standard result-map shape.
+
+  Text is lowercased and split on non-alphanumeric characters. Options `:k1`
+  and `:b` default to 1.2 and 0.75."
+  ([idx query k]
+   (bm25-search idx query k nil))
+  ([idx query k opts]
+   (mapv (fn [{:keys [id] :as result}]
+           (assoc result :metadata (get @(:metadata idx) id)))
+         (bm25/search @(:bm25 idx) query k (or opts {})))))
 
 (defn- raw-score
   ^double [metric distance]
@@ -244,7 +266,8 @@
     (if-let [existing (optional-item (get-optional idx id))]
       (let [removed? (.remove ^Index (:index idx) id (.version ^VItem existing))]
         (when removed?
-          (swap! (:metadata idx) dissoc id))
+          (swap! (:metadata idx) dissoc id)
+          (swap! (:bm25 idx) bm25/remove-doc id))
         removed?)
       false)))
 
@@ -284,7 +307,8 @@
     (spit meta-file
           (pr-str {:opts (:opts idx)
                    :capacity @(:capacity idx)
-                   :metadata @(:metadata idx)}))
+                   :metadata @(:metadata idx)
+                   :bm25 @(:bm25 idx)}))
     path))
 
 (defn load-index
@@ -300,7 +324,7 @@
     (when-not (and (.isFile ^File index-file) (.isFile ^File meta-file))
       (missing-index! dir))
     (let [loader (.getClassLoader ^Class vitem-class)
-          {:keys [opts capacity metadata]} (edn/read-string (slurp meta-file))
+          {:keys [opts capacity metadata bm25]} (edn/read-string (slurp meta-file))
           type (get opts :type :hnsw)
           loaded (case type
                    :hnsw (HnswIndex/load ^File index-file ^ClassLoader loader)
@@ -311,5 +335,6 @@
       {:index loaded
        :opts (assoc opts :type type)
        :metadata (atom metadata)
+       :bm25 (atom (or bm25 (bm25/empty-index)))
        :capacity (atom capacity)
        :lock (Object.)})))

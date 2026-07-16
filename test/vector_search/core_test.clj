@@ -378,3 +378,35 @@
       (is (= [0 2 4 6 8] (mapv :id res)))
       (is (apply >= (map :score res))))
     (is (= [] (vs/search idx [1.0 0.0] 3 {:filter (constantly false)})))))
+
+(deftest bm25-search-matches-worked-example
+  ;; Robertson BM25 with k1=1.2, b=0.75. N=3, avgdl=3, and both
+  ;; query terms have df=2, giving idf=log(1 + 1.5/2.5).
+  (let [idx (vs/index {:type :exact :dim 2})]
+    (vs/add-batch! idx [{:id :d1 :vector [1.0 0.0]
+                         :text "The quick brown fox"}
+                        {:id :d2 :vector [0.0 1.0]
+                         :text "the quick fox"}
+                        {:id :d3 :vector [-1.0 0.0]
+                         :text "lazy dog"}])
+    (if-let [bm25-search (ns-resolve 'vector-search.core 'bm25-search)]
+      (let [results (bm25-search idx "QUICK, fox!" 3)]
+        (is (= [:d2 :d1] (mapv :id results)))
+        (is (approx= 0.9400072585 (:score (first results))))
+        (is (approx= 0.8272063875 (:score (second results))))
+        (is (= nil (:metadata (first results)))))
+      (is false "bm25-search is not implemented"))))
+
+(deftest bm25-index-tracks-replacement-removal-and-options
+  (let [idx (vs/index {:type :exact :dim 2})]
+    (vs/add-batch! idx [{:id :a :vector [1.0 0.0] :text "alpha alpha"}
+                        {:id :b :vector [0.0 1.0] :text "beta"}])
+    (if-let [bm25-search (ns-resolve 'vector-search.core 'bm25-search)]
+      (do
+        (is (= [:a] (mapv :id (bm25-search idx "alpha" 10))))
+        (vs/add-batch! idx [{:id :a :vector [1.0 0.0] :text "gamma"}])
+        (is (= [] (bm25-search idx "alpha" 10)))
+        (is (= [:a] (mapv :id (bm25-search idx "gamma" 10 {:k1 2.0 :b 0.5}))))
+        (vs/remove! idx :a)
+        (is (= [] (bm25-search idx "gamma" 10))))
+      (is false "bm25-search is not implemented"))))

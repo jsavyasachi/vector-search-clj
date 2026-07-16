@@ -35,12 +35,18 @@ Pure JVM - no native dependencies, no server.
 
 (def idx (vs/index {:dim 384 :metric :cosine}))
 
-(vs/add! idx "chunk-1" vec-1 {:source "report.pdf" :page 3})
+(vs/add! idx "chunk-1" vec-1 {:source "report.pdf" :page 3}
+         "Quarterly revenue for product ZX-81")
 (vs/add! idx "chunk-2" vec-2 {:source "report.pdf" :page 7})
-(vs/add-batch! idx [{:id "chunk-3" :vector vec-3 :metadata {:source "notes.md"}}])
+(vs/add-batch! idx [{:id "chunk-3" :vector vec-3
+                     :metadata {:source "notes.md"}
+                     :text "ZX-81 launch notes"}])
 
 (vs/search idx query-vec 10)
 ;; => [{:id "chunk-2" :score 0.87 :metadata {:source "report.pdf" :page 7}} ...]
+
+(vs/bm25-search idx "ZX-81 revenue" 10)
+;; => [{:id "chunk-1" :score 1.31 :metadata {:source "report.pdf" :page 3}} ...]
 
 (vs/get-item idx "chunk-1")   ;; => {:id .. :vector float[] :metadata ..}
 (vs/remove! idx "chunk-1")    ;; => true
@@ -92,6 +98,10 @@ Semantics worth knowing:
 - **Vectors**: `float[]` (zero-copy) or any sequential of numbers.
 - **Ids**: any EDN-round-trippable, `Serializable` value (strings, keywords,
   numbers, ...).
+- **BM25 text**: optional fifth argument to `add!`, or `:text` in an
+  `add-batch!` item. Tokenization lowercases and splits on non-alphanumeric
+  characters. `bm25-search` accepts optional `:k1` and `:b` values, defaulting
+  to `1.2` and `0.75`.
 - **`add!` with an existing id replaces** the stored vector and metadata.
 - **HNSW is approximate**: recall is tuned by `:ef` (the seeded test suite
   holds recall@10 ≈ 0.99 on defaults, measured against an `:exact` index as
