@@ -35,12 +35,26 @@ Pure JVM - no native dependencies, no server.
 
 (def idx (vs/index {:dim 384 :metric :cosine}))
 
-(vs/add! idx "chunk-1" vec-1 {:source "report.pdf" :page 3})
+(vs/add! idx "chunk-1" vec-1 {:source "report.pdf" :page 3}
+         "Quarterly revenue for product ZX-81")
 (vs/add! idx "chunk-2" vec-2 {:source "report.pdf" :page 7})
-(vs/add-batch! idx [{:id "chunk-3" :vector vec-3 :metadata {:source "notes.md"}}])
+(vs/add-batch! idx [{:id "chunk-3" :vector vec-3
+                     :metadata {:source "notes.md"}
+                     :text "ZX-81 launch notes"}])
 
 (vs/search idx query-vec 10)
 ;; => [{:id "chunk-2" :score 0.87 :metadata {:source "report.pdf" :page 7}} ...]
+
+(vs/bm25-search idx "ZX-81 revenue" 10)
+;; => [{:id "chunk-1" :score 1.31 :metadata {:source "report.pdf" :page 3}} ...]
+
+(vs/hybrid-search idx query-vec "ZX-81 revenue" 10)
+;; Reciprocal Rank Fusion by default; :score is the fused score.
+
+(vs/hybrid-search idx query-vec "ZX-81 revenue" 10
+                  {:fusion :weighted
+                   :dense-weight 0.4
+                   :sparse-weight 0.6})
 
 (vs/get-item idx "chunk-1")   ;; => {:id .. :vector float[] :metadata ..}
 (vs/remove! idx "chunk-1")    ;; => true
@@ -74,15 +88,35 @@ type, and legacy saves load as `:hnsw`.
 (def exact (vs/index {:dim 384 :type :exact}))
 ```
 
-Filtered search takes a predicate over the result map:
+Filtered search accepts a structured metadata filter:
+
+```clojure
+(vs/search idx query 5 {:filter {:eq [:kind :report]}})
+(vs/search idx query 5 {:filter {:in [:status #{:draft :published}]}})
+(vs/search idx query 5 {:filter {:range [:page 3 10]}}) ; inclusive
+(vs/search idx query 5
+           {:filter {:and [{:eq [:kind :report]}
+                           {:not {:range [:page 1 2]}}]}})
+```
+
+The DSL operators are `{:eq [key value]}`, `{:in [key values]}`,
+`{:range [key low high]}` (inclusive), `{:gt [key bound]}`,
+`{:lt [key bound]}`, `{:and [filters...]}`, `{:or [filters...]}`, and
+`{:not filter}`. Keys address top-level metadata fields. Equality and
+membership use an inverted metadata index. Boolean expressions apply their
+range comparisons only to the candidates surviving indexed clauses, and the
+resolved IDs are scored directly instead of over-fetching the ANN index.
+`hybrid-search` accepts the same `:filter` option.
+
+The original arbitrary predicate form remains supported:
 
 ```clojure
 (vs/search idx query 5 {:filter #(= :report (get-in % [:metadata :kind]))})
 ```
 
-Filtering over-fetches candidates and doubles the candidate set (up to the
-whole index) until `k` matches are found - a highly selective filter on a
-large index costs proportionally more.
+Predicate filtering over-fetches candidates and doubles the candidate set (up
+to the whole index) until `k` matches are found. Use the structured DSL for
+indexed filtering.
 
 Semantics worth knowing:
 
@@ -92,6 +126,15 @@ Semantics worth knowing:
 - **Vectors**: `float[]` (zero-copy) or any sequential of numbers.
 - **Ids**: any EDN-round-trippable, `Serializable` value (strings, keywords,
   numbers, ...).
+- **BM25 text**: optional fifth argument to `add!`, or `:text` in an
+  `add-batch!` item. Tokenization lowercases and splits on non-alphanumeric
+  characters. `bm25-search` accepts optional `:k1` and `:b` values, defaulting
+  to `1.2` and `0.75`.
+- **Hybrid retrieval**: `hybrid-search` fuses dense and BM25 candidates with
+  Reciprocal Rank Fusion by default (`:rrf-k` defaults to `60`). Set `:fusion`
+  to `:weighted` for min-max normalized score fusion; `:dense-weight` and
+  `:sparse-weight` each default to `0.5`. `:candidate-count` controls each
+  retrieval list's depth and defaults to four times the requested result count.
 - **`add!` with an existing id replaces** the stored vector and metadata.
 - **HNSW is approximate**: recall is tuned by `:ef` (the seeded test suite
   holds recall@10 ≈ 0.99 on defaults, measured against an `:exact` index as
