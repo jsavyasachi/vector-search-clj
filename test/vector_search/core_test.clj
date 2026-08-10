@@ -362,9 +362,9 @@
     (testing "fewer matches than k returns all matches"
       (let [res (vs/search idx [1.0 0.0] 50 {:filter #(= :b (get-in % [:metadata :group]))})]
         (is (= 10 (count res)))))
-    (testing "no opts arg behaves as before"
+    (testing "search without an opts argument returns k results"
       (is (= 3 (count (vs/search idx [1.0 0.0] 3)))))
-    (testing "empty opts map behaves as unfiltered"
+    (testing "an empty opts map does no filtering"
       (is (= 3 (count (vs/search idx [1.0 0.0] 3 {})))))))
 
 (deftest exact-filtered-search

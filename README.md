@@ -77,12 +77,13 @@ Options to `index` (defaults shown):
 | `:ef-construction` | `200` | build-time search breadth |
 | `:ef` | `50` | query-time search breadth; higher = better recall, slower |
 
-`:exact` builds a brute-force index: exhaustive exact search, O(n) per query,
-no capacity or tuning knobs (passing `:m`, `:ef-construction`, or `:ef` with
-`:exact` throws `:invalid-option`). Useful as ground truth for recall testing
-or for small corpora. The rest of the API - including `:filter`, metadata,
-and `save`/`load-index` - behaves identically; `meta.edn` records the index
-type, and legacy saves load as `:hnsw`.
+`:exact` builds a brute-force index. It does an exhaustive exact search, O(n)
+per query, with no capacity or tuning knobs. If you give `:m`,
+`:ef-construction`, or `:ef` with `:exact`, the index throws
+`:invalid-option`. Use `:exact` as ground truth for recall tests, or for a
+small corpus. The rest of the API behaves the same way, including `:filter`,
+metadata, and `save`/`load-index`. `meta.edn` records the index type. An older
+save loads as `:hnsw`.
 
 ```clojure
 (def exact (vs/index {:dim 384 :type :exact}))
@@ -103,22 +104,22 @@ The DSL operators are `{:eq [key value]}`, `{:in [key values]}`,
 `{:range [key low high]}` (inclusive), `{:gt [key bound]}`,
 `{:lt [key bound]}`, `{:and [filters...]}`, `{:or [filters...]}`, and
 `{:not filter}`. Keys address top-level metadata fields. Equality and
-membership use an inverted metadata index. Boolean expressions apply their
-range comparisons only to the candidates surviving indexed clauses, and the
-resolved IDs are scored directly instead of over-fetching the ANN index.
-`hybrid-search` accepts the same `:filter` option.
+membership use an inverted metadata index. A boolean expression applies its
+range comparisons only to the candidates that the indexed clauses keep. The
+index scores the resolved IDs directly. It does not over-fetch from the ANN
+index. `hybrid-search` accepts the same `:filter` option.
 
-The original arbitrary predicate form remains supported:
+The library still supports the original arbitrary predicate form:
 
 ```clojure
 (vs/search idx query 5 {:filter #(= :report (get-in % [:metadata :kind]))})
 ```
 
-Predicate filtering over-fetches candidates and doubles the candidate set (up
-to the whole index) until `k` matches are found. Use the structured DSL for
+Predicate filtering over-fetches candidates. It doubles the candidate set, up
+to the whole index, until it finds `k` matches. Use the structured DSL for
 indexed filtering.
 
-Semantics worth knowing:
+Semantics:
 
 - **Scores**: for `:cosine` and `:dot`, `:score` is a similarity (higher is
   better; cosine of an exact match ≈ 1.0). For `:euclidean` it is the L2
@@ -128,13 +129,13 @@ Semantics worth knowing:
   numbers, ...).
 - **BM25 text**: optional fifth argument to `add!`, or `:text` in an
   `add-batch!` item. Tokenization lowercases and splits on non-alphanumeric
-  characters. `bm25-search` accepts optional `:k1` and `:b` values, defaulting
-  to `1.2` and `0.75`.
+  characters. `bm25-search` accepts optional `:k1` and `:b` values. They
+  default to `1.2` and `0.75`.
 - **Hybrid retrieval**: `hybrid-search` fuses dense and BM25 candidates with
   Reciprocal Rank Fusion by default (`:rrf-k` defaults to `60`). Set `:fusion`
   to `:weighted` for min-max normalized score fusion; `:dense-weight` and
-  `:sparse-weight` each default to `0.5`. `:candidate-count` controls each
-  retrieval list's depth and defaults to four times the requested result count.
+  `:sparse-weight` each default to `0.5`. `:candidate-count` controls the depth
+  of each retrieval list. It defaults to four times the requested result count.
 - **`add!` with an existing id replaces** the stored vector and metadata.
 - **HNSW is approximate**: recall is tuned by `:ef` (the seeded test suite
   holds recall@10 ≈ 0.99 on defaults, measured against an `:exact` index as
@@ -150,8 +151,8 @@ Errors are `ex-info` maps keyed `:vector-search/error`
 clojure -M:test
 ```
 
-Everything is deterministic and self-contained (the recall smoke test uses a
-seeded RNG); there is nothing to download.
+The tests are deterministic and self-contained. The recall smoke test uses a
+seeded RNG. There is nothing to download.
 
 ## License
 

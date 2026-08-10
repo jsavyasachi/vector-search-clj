@@ -97,9 +97,8 @@
 (defn index
   "Creates an embedded vector index handle.
 
-  :type is :hnsw by default. :exact uses exhaustive exact search, O(n) per
-  query, with no tuning knobs; it is useful as ground truth or for small
-  corpora.
+  :type is :hnsw by default. :exact does an exhaustive exact search, O(n) per
+  query, with no tuning knobs. Use it as ground truth, or for a small corpus.
   :ef trades recall for speed during search; higher values improve recall."
   [opts]
   (when-not (:dim opts)
@@ -155,7 +154,7 @@
           (reset! capacity-ref new-capacity))))))
 
 (defn add!
-  "Adds or replaces id with vector v. Metadata is stored outside hnswlib.
+  "Adds or replaces id with vector v. The index stores metadata outside hnswlib.
 
   The five-argument form optionally indexes text for BM25 retrieval."
   ([idx id v]
@@ -200,8 +199,8 @@
 (defn bm25-search
   "Returns BM25 text matches best-first in the standard result-map shape.
 
-  Text is lowercased and split on non-alphanumeric characters. Options `:k1`
-  and `:b` default to 1.2 and 0.75."
+  The index lowercases the text and splits it on non-alphanumeric characters.
+  Options `:k1` and `:b` default to 1.2 and 0.75."
   ([idx query k]
    (bm25-search idx query k nil))
   ([idx query k opts]
@@ -256,8 +255,8 @@
   With opts, `:filter` can be a structured metadata filter (`:eq`, `:in`,
   `:range`, `:gt`, `:lt`, `:and`, `:or`, or `:not`) or a predicate over the
   result map. Structured equality and membership use an inverted metadata
-  index, then only matching vectors are scored. Predicate filtering retains
-  the original candidate over-fetching behavior."
+  index. The index then scores only the matching vectors. Predicate filtering
+  keeps the original candidate over-fetch behavior."
   ([idx query-vec k]
    (search idx query-vec k nil))
   ([idx query-vec k {:keys [filter] :as opts}]
@@ -294,7 +293,7 @@
 
   The default `:fusion` is reciprocal rank fusion (`:rrf`) with `:rrf-k` 60.
   `:fusion :weighted` min-max normalizes each score list and combines it with
-  `:dense-weight` and `:sparse-weight`, each defaulting to 0.5."
+  `:dense-weight` and `:sparse-weight`. Each weight defaults to 0.5."
   ([idx query-vec query-text k]
    (hybrid-search idx query-vec query-text k nil))
   ([idx query-vec query-text k opts]
@@ -356,7 +355,7 @@
                    :path (.getPath dir)})))
 
 (defn save
-  "Persists idx into path, a directory created when absent. Returns path."
+  "Saves idx into path, a directory. Creates the directory when absent. Returns path."
   [idx path]
   (let [dir (path-file path)
         index-file (io/file dir "index.bin")
@@ -375,9 +374,9 @@
 (defn load-index
   "Loads an index handle from path, a directory containing index.bin and meta.edn.
 
-  :type in meta.edn selects :hnsw or :exact. Legacy saves without :type load as
-  :hnsw. :exact uses exhaustive exact search, O(n) per query, with no tuning
-  knobs; it is useful as ground truth or for small corpora."
+  :type in meta.edn selects :hnsw or :exact. An older save without :type loads
+  as :hnsw. :exact does an exhaustive exact search, O(n) per query, with no
+  tuning knobs. Use it as ground truth, or for a small corpus."
   [path]
   (let [dir (path-file path)
         index-file (io/file dir "index.bin")

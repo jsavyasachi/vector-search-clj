@@ -29,8 +29,8 @@ clojure -M:1.12:test       # Clojure 1.12 matrix cell
 clojure -T:build jar       # build a jar
 ```
 
-The whole suite is deterministic and self-contained (seeded RNG for the
-recall smoke test); there is nothing to download.
+The whole suite is deterministic and self-contained. The recall smoke test
+uses a seeded RNG. There is nothing to download.
 
 The bar for a mergeable change:
 

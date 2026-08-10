@@ -20,6 +20,6 @@ Please include:
 - steps to reproduce (or a proof of concept), and
 - the affected version(s).
 
-You can expect an initial acknowledgement within a reasonable time. Once the
-issue is confirmed and a fix is released, the advisory will be published with
-credit to the reporter unless you request otherwise.
+You can expect a first reply within a reasonable time. After we confirm the
+issue and release a fix, we publish the advisory. The advisory gives credit to
+the reporter, unless you request otherwise.
