@@ -1,0 +1,7 @@
+{:linters
+ {:locking-suspicious-lock
+  {:level :off
+   ;; Suppress the two existing local lock expressions: selecting shared locks
+   ;; requires a concurrency design decision and changes runtime behavior.
+   }}
+}

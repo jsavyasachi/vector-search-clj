@@ -9,6 +9,16 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clj-kondo
+        uses: DeLaGuardo/setup-clj-kondo@afc83dbbf4e7e32e04649e29dbf30668d30e9e3e
+        with:
+          version: '2026.05.25'
+      - run: clj-kondo --lint src test
+
   test:
     runs-on: ubuntu-latest
     strategy:
