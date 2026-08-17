@@ -1,7 +1,8 @@
 (ns vector-search.core-test
   (:require [clojure.test :refer [deftest is testing]]
             [vector-search.core :as vs])
-  (:import [java.io File]
+  (:import [com.github.jelmerk.hnswlib.core.hnsw HnswIndex]
+           [java.io File]
            [java.nio.file Files]))
 
 (set! *warn-on-reflection* true)
@@ -250,6 +251,16 @@
             :option :ef}
            (ex-data-for #(vs/search idx [1.0 0.0] 1 {:ef 10}))))))
 
+(deftest hnsw-search-applies-query-ef
+  (let [idx (vs/index {:dim 2 :capacity 4 :ef 50})]
+    (vs/add! idx :x [1.0 0.0])
+    (with-redefs [vector-search.core/raw-search
+                  (fn [actual-idx _ _]
+                    (is (= 7 (.getEf ^HnswIndex (:index actual-idx))))
+                    [])]
+      (is (= [] (vs/search idx [1.0 0.0] 1 {:ef 7}))))
+    (is (= 50 (.getEf ^HnswIndex (:index idx))))))
+
 (deftest save-load-round-trips-index-and-metadata
   (let [dir (temp-dir)]
     (try
@@ -345,6 +356,24 @@
         (is (= 2 (vs/size (vs/load-index dir)))))
       (finally
         (delete-recursive! dir)))))
+
+(deftest load-index-rejects-torn-snapshot
+  (let [dir (temp-dir)
+        other-dir (temp-dir)]
+    (try
+      (let [first-index (vs/index {:dim 2 :capacity 4})
+            second-index (vs/index {:dim 2 :capacity 4})]
+        (vs/add! first-index :first [1.0 0.0] {:snapshot :first})
+        (vs/add! second-index :second [0.0 1.0] {:snapshot :second})
+        (vs/save first-index dir)
+        (vs/save second-index other-dir)
+        (spit (File. dir "meta.edn")
+              (slurp (File. other-dir "meta.edn")))
+        (is (= :snapshot-mismatch
+               (:vector-search/error (ex-data-for #(vs/load-index dir))))))
+      (finally
+        (delete-recursive! dir)
+        (delete-recursive! other-dir)))))
 
 (deftest filtered-search
   (let [idx (vs/index {:dim 2 :metric :cosine :capacity 100})]

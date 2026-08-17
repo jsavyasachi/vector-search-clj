@@ -8,6 +8,8 @@
            [com.github.jelmerk.hnswlib.core.bruteforce BruteForceIndex]
            [com.github.jelmerk.hnswlib.core.hnsw HnswIndex]
            [java.io File FileOutputStream Serializable]
+           [java.nio.file CopyOption Files StandardCopyOption]
+           [java.security MessageDigest]
            [java.util Optional]))
 
 (set! *warn-on-reflection* true)
@@ -229,6 +231,19 @@
   (mapv #(result-map idx %)
         (.findNearest ^Index (:index idx) query (int candidate-count))))
 
+(defn- with-query-ef
+  [idx opts f]
+  (if (and (= :hnsw (get-in idx [:opts :type])) (contains? opts :ef))
+    (locking (:lock idx)
+      (let [^HnswIndex hnsw (:index idx)
+            previous-ef (.getEf hnsw)]
+        (try
+          (.setEf hnsw (int (:ef opts)))
+          (f)
+          (finally
+            (.setEf hnsw previous-ef)))))
+    (f)))
+
 (defn- candidate-search
   [idx ^floats query candidate-ids k]
   (let [metric (get-in idx [:opts :metric])
@@ -262,31 +277,33 @@
   ([idx query-vec k {:keys [filter] :as opts}]
    (when (and (= :exact (get-in idx [:opts :type])) (contains? opts :ef))
      (invalid-option! :exact :ef))
-   (let [^floats query (checked-vector idx query-vec)
-         item-count (.size ^Index (:index idx))
-         k (long k)]
-     (cond
-       (zero? (min k item-count)) []
+   (with-query-ef
+     idx opts
+     #(let [^floats query (checked-vector idx query-vec)
+            item-count (.size ^Index (:index idx))
+            k (long k)]
+        (cond
+          (zero? (min k item-count)) []
 
-       (nil? filter)
-       (raw-search idx query (min k item-count))
+          (nil? filter)
+          (raw-search idx query (min k item-count))
 
-       (map? filter)
-       (candidate-search idx query
-                         (metadata-filter/matching-ids @(:metadata-index idx)
-                                                       @(:metadata idx)
-                                                       filter)
-                         k)
+          (map? filter)
+          (candidate-search idx query
+                            (metadata-filter/matching-ids @(:metadata-index idx)
+                                                          @(:metadata idx)
+                                                          filter)
+                            k)
 
-       :else
-       (loop [n (if (= :exact (get-in idx [:opts :type]))
-                  item-count
-                  (min item-count (max (* 2 k) 32)))]
-         (let [hits (into [] (comp (clojure.core/filter filter) (take k))
-                          (raw-search idx query n))]
-           (if (or (= (count hits) k) (>= n item-count))
-             hits
-             (recur (min item-count (* 2 n))))))))))
+          :else
+          (loop [n (if (= :exact (get-in idx [:opts :type]))
+                     item-count
+                     (min item-count (max (* 2 k) 32)))]
+            (let [hits (into [] (comp (clojure.core/filter filter) (take k))
+                             (raw-search idx query n))]
+              (if (or (= (count hits) k) (>= n item-count))
+                hits
+                (recur (min item-count (* 2 n)))))))))))
 
 (defn hybrid-search
   "Fuses dense vector and BM25 text retrieval into standard result maps.
@@ -354,6 +371,29 @@
                   {:vector-search/error :index-not-found
                    :path (.getPath dir)})))
 
+(defn- snapshot-mismatch!
+  [^File dir]
+  (throw (ex-info "Vector search index snapshot files do not match"
+                  {:vector-search/error :snapshot-mismatch
+                   :path (.getPath dir)})))
+
+(defn- sha256
+  [^File file]
+  (let [digest (MessageDigest/getInstance "SHA-256")
+        buffer (byte-array 8192)]
+    (with-open [in (io/input-stream file)]
+      (loop [read (.read in buffer)]
+        (when-not (neg? read)
+          (.update digest buffer 0 read)
+          (recur (.read in buffer)))))
+    (apply str (map #(format "%02x" (bit-and % 0xff)) (.digest digest)))))
+
+(defn- atomic-move!
+  [^File from ^File to]
+  (Files/move (.toPath from) (.toPath to)
+              (into-array CopyOption [StandardCopyOption/ATOMIC_MOVE
+                                      StandardCopyOption/REPLACE_EXISTING])))
+
 (defn save
   "Saves idx into path, a directory. Creates the directory when absent. Returns path."
   [idx path]
@@ -361,14 +401,24 @@
         index-file (io/file dir "index.bin")
         meta-file (io/file dir "meta.edn")]
     (.mkdirs dir)
-    (with-open [out (FileOutputStream. ^File index-file)]
-      (.save ^Index (:index idx) out))
-    (spit meta-file
-          (pr-str {:opts (:opts idx)
-                   :capacity @(:capacity idx)
-                   :metadata @(:metadata idx)
-                   :metadata-index @(:metadata-index idx)
-                   :bm25 @(:bm25 idx)}))
+    (let [index-temp (File/createTempFile "index-" ".tmp" dir)
+          meta-temp (File/createTempFile "meta-" ".tmp" dir)]
+      (try
+        (locking (:lock idx)
+          (with-open [out (FileOutputStream. ^File index-temp)]
+            (.save ^Index (:index idx) out))
+          (spit meta-temp
+                (pr-str {:opts (:opts idx)
+                         :capacity @(:capacity idx)
+                         :metadata @(:metadata idx)
+                         :metadata-index @(:metadata-index idx)
+                         :bm25 @(:bm25 idx)
+                         :index-sha256 (sha256 index-temp)})))
+        (atomic-move! index-temp index-file)
+        (atomic-move! meta-temp meta-file)
+        (finally
+          (.delete index-temp)
+          (.delete meta-temp))))
     path))
 
 (defn load-index
@@ -384,15 +434,20 @@
     (when-not (and (.isFile ^File index-file) (.isFile ^File meta-file))
       (missing-index! dir))
     (let [loader (.getClassLoader ^Class vitem-class)
-          {:keys [opts capacity metadata metadata-index bm25]}
+          {:keys [opts capacity metadata metadata-index bm25 index-sha256]}
           (edn/read-string (slurp meta-file))
+          _ (when (and index-sha256 (not= index-sha256 (sha256 index-file)))
+              (snapshot-mismatch! dir))
           type (get opts :type :hnsw)
           loaded (case type
                    :hnsw (HnswIndex/load ^File index-file ^ClassLoader loader)
                    :exact (BruteForceIndex/load ^File index-file ^ClassLoader loader)
                    (throw (ex-info "Unknown vector-search index type"
                                    {:vector-search/error :unknown-index-type
-                                    :type type})))]
+                                    :type type})))
+          verified-index-sha256 (when index-sha256 (sha256 index-file))]
+      (when (and index-sha256 (not= index-sha256 verified-index-sha256))
+        (snapshot-mismatch! dir))
       {:index loaded
        :opts (assoc opts :type type)
        :metadata (atom metadata)
