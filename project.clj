@@ -1,4 +1,4 @@
-(def version "0.5.0")
+(def version "0.6.0")
 
 (defproject net.clojars.savya/vector-search-clj version
   :plugins [[lein-tools-deps "0.4.5"]]
