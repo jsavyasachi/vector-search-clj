@@ -4,9 +4,18 @@ All notable changes to this project are documented here. Format follows [Keep a 
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-27
+
 ### Added
 
 - Added Manhattan, correlation, Canberra, and Bray-Curtis distance metrics.
+
+### Fixed
+
+- Sort order and hybrid dense/sparse fusion now whitelist `:cosine` and
+  `:dot` as similarity metrics (higher is better) instead of hard-coding
+  `:euclidean` as the only "lower is better" metric, so the new distance
+  metrics sort correctly.
 
 ## [0.4.1] - 2026-08-17
 
