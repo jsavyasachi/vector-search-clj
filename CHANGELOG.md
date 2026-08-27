@@ -4,6 +4,13 @@ All notable changes to this project are documented here. Format follows [Keep a 
 
 ## [Unreleased]
 
+### Added
+
+- Added custom Clojure distance functions with explicit higher-is-better or
+  lower-is-better score direction.
+- Custom-distance indexes fail early when saved because arbitrary functions
+  cannot be reliably reconstructed during deserialization.
+
 ## [0.5.0] - 2026-08-27
 
 ### Added
