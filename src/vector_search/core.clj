@@ -48,6 +48,10 @@
     :cosine DistanceFunctions/FLOAT_COSINE_DISTANCE
     :dot DistanceFunctions/FLOAT_INNER_PRODUCT
     :euclidean DistanceFunctions/FLOAT_EUCLIDEAN_DISTANCE
+    :manhattan DistanceFunctions/FLOAT_MANHATTAN_DISTANCE
+    :correlation DistanceFunctions/FLOAT_CORRELATION_DISTANCE
+    :canberra DistanceFunctions/FLOAT_CANBERRA_DISTANCE
+    :bray-curtis DistanceFunctions/FLOAT_BRAY_CURTIS_DISTANCE
     (throw (ex-info "Unknown vector-search metric"
                     {:vector-search/error :unknown-metric
                      :metric metric}))))
@@ -216,7 +220,7 @@
     (case metric
       :cosine (- 1.0 d)
       :dot (- 1.0 d)
-      :euclidean d)))
+      d)))
 
 (defn- result-map
   [idx ^SearchResult result]
@@ -255,9 +259,9 @@
                     :score (raw-score metric
                                       (.distance distance-fn query (.vector item)))
                     :metadata (get @(:metadata idx) id)})))
-         (sort-by (if (= :euclidean metric)
-                    (fn [{:keys [id score]}] [score (pr-str id)])
-                    (fn [{:keys [id score]}] [(- score) (pr-str id)])))
+         (sort-by (if (#{:cosine :dot} metric)
+                    (fn [{:keys [id score]}] [(- score) (pr-str id)])
+                    (fn [{:keys [id score]}] [score (pr-str id)])))
          (take k)
          vec)))
 
@@ -265,7 +269,8 @@
   "Returns nearest results best-first.
 
   For :cosine and :dot, :score is a similarity where higher is better. For
-  :euclidean, :score is L2 distance where lower is better.
+  :euclidean, :manhattan, :correlation, :canberra, and :bray-curtis, :score is
+  a distance where lower is better.
 
   With opts, `:filter` can be a structured metadata filter (`:eq`, `:in`,
   `:range`, `:gt`, `:lt`, `:and`, `:or`, or `:not`) or a predicate over the
@@ -331,7 +336,7 @@
                           sparse-results)]
      (hybrid/fuse dense-results sparse-results k
                   (assoc opts :dense-higher?
-                         (not= :euclidean (get-in idx [:opts :metric])))))))
+                         (#{:cosine :dot} (get-in idx [:opts :metric])))))))
 
 (defn remove!
   "Removes id from the index. Returns true when an item was removed."

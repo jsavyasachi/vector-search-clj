@@ -103,6 +103,25 @@
       (is (approx= (Math/sqrt 2.0) (:score (first results))))
       (is (< (:score (first results)) (:score (second results)))))))
 
+(deftest additional-distance-metrics-use-distance-scores
+  (testing "manhattan"
+    (let [idx (vs/index {:type :exact :dim 2 :metric :manhattan})]
+      (vs/add! idx :item [4.0 6.0])
+      (is (approx= 7.0 (:score (first (vs/search idx [1.0 2.0] 1)))))))
+  (testing "correlation"
+    (let [idx (vs/index {:type :exact :dim 3 :metric :correlation})]
+      (vs/add! idx :item [1.0 3.0 2.0])
+      (is (approx= 0.5 (:score (first (vs/search idx [1.0 2.0 3.0] 1)))))))
+  (testing "canberra"
+    (let [idx (vs/index {:type :exact :dim 2 :metric :canberra})]
+      (vs/add! idx :item [4.0 6.0])
+      (is (approx= 1.1 (:score (first (vs/search idx [1.0 2.0] 1)))))))
+  (testing "bray-curtis"
+    (let [idx (vs/index {:type :exact :dim 2 :metric :bray-curtis})]
+      (vs/add! idx :item [4.0 6.0])
+      (is (approx= (/ 7.0 13.0)
+                   (:score (first (vs/search idx [1.0 2.0] 1))))))))
+
 (deftest metadata-and-vectors-round-trip
   (let [idx (vs/index {:dim 2 :capacity 4})
         raw (float-array [0.25 0.75])]
