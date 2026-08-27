@@ -10,7 +10,7 @@
            [java.io File FileOutputStream Serializable]
            [java.nio.file CopyOption Files StandardCopyOption]
            [java.security MessageDigest]
-           [java.util Optional]))
+           [java.util Comparator Optional]))
 
 (set! *warn-on-reflection* true)
 
@@ -42,6 +42,9 @@
 (def ^:private float-array-class
   (Class/forName "[F"))
 
+(def ^:private score-directions
+  #{:higher-is-better :lower-is-better})
+
 (defn- metric-distance-fn
   ^DistanceFunction [metric]
   (case metric
@@ -55,6 +58,35 @@
     (throw (ex-info "Unknown vector-search metric"
                     {:vector-search/error :unknown-metric
                      :metric metric}))))
+
+(defn- custom-distance-fn
+  ^DistanceFunction [distance-fn]
+  (reify DistanceFunction
+    (distance [_ query candidate]
+      (let [^floats query query
+            ^floats candidate candidate]
+        (float (distance-fn query candidate))))))
+
+(defn- distance-fn
+  ^DistanceFunction [{:keys [metric distance-fn]}]
+  (if (= :custom metric)
+    (custom-distance-fn distance-fn)
+    (metric-distance-fn metric)))
+
+(defn- score-higher?
+  [{:keys [metric score-direction]}]
+  (if (= :custom metric)
+    (= :higher-is-better score-direction)
+    (#{:cosine :dot} metric)))
+
+(defn- custom-distance-comparator
+  ^Comparator [direction]
+  (reify Comparator
+    (compare [_ left right]
+      (let [comparison (Double/compare (double left) (double right))]
+        (if (= :higher-is-better direction)
+          (- comparison)
+          comparison)))))
 
 (defn- invalid-option!
   [type option]
@@ -71,28 +103,52 @@
 
 (defn- normalize-opts
   [opts]
-  (case (get opts :type :hnsw)
-    :hnsw (merge default-hnsw-opts opts)
-    :exact (do
-             (validate-exact-index-opts! opts)
-             (merge default-exact-opts opts))
-    (throw (ex-info "Unknown vector-search index type"
-                    {:vector-search/error :unknown-index-type
-                     :type (:type opts)}))))
+  (let [type (get opts :type :hnsw)
+        defaults (case type
+                   :hnsw default-hnsw-opts
+                   :exact (do
+                            (validate-exact-index-opts! opts)
+                            default-exact-opts)
+                   (throw (ex-info "Unknown vector-search index type"
+                                   {:vector-search/error :unknown-index-type
+                                    :type type})))]
+    (if (contains? opts :distance-fn)
+      (do
+        (when-not (ifn? (:distance-fn opts))
+          (throw (ex-info "Custom distance function must be callable"
+                          {:vector-search/error :invalid-distance-fn})))
+        (when-not (contains? opts :score-direction)
+          (throw (ex-info "Custom distance functions require a score direction"
+                          {:vector-search/error :missing-score-direction})))
+        (when-not (score-directions (:score-direction opts))
+          (throw (ex-info "Unknown custom distance score direction"
+                          {:vector-search/error :invalid-score-direction
+                           :score-direction (:score-direction opts)})))
+        (assoc (merge defaults opts) :metric :custom))
+      (merge defaults opts))))
 
 (defn- build-hnsw-index
-  ^HnswIndex [{:keys [dim metric capacity m ef-construction ef]}]
-  (-> (doto (HnswIndex/newBuilder (int dim) (metric-distance-fn metric) (int capacity))
+  ^HnswIndex [{:keys [dim capacity m ef-construction ef] :as opts}]
+  (let [builder (if (= :custom (:metric opts))
+                  (HnswIndex/newBuilder (int dim)
+                                        (distance-fn opts)
+                                        (custom-distance-comparator (:score-direction opts))
+                                        (int capacity))
+                  (HnswIndex/newBuilder (int dim) (distance-fn opts) (int capacity)))]
+    (-> (doto builder
         (.withM (int m))
         (.withEfConstruction (int ef-construction))
         (.withEf (int ef))
         (.withRemoveEnabled))
-      (.build)))
+        (.build))))
 
 (defn- build-exact-index
-  ^BruteForceIndex [{:keys [dim metric]}]
-  (-> (BruteForceIndex/newBuilder (int dim) (metric-distance-fn metric))
-      (.build)))
+  ^BruteForceIndex [{:keys [dim] :as opts}]
+  (if (= :custom (:metric opts))
+    (.build (BruteForceIndex/newBuilder (int dim)
+                                        (distance-fn opts)
+                                        (custom-distance-comparator (:score-direction opts))))
+    (.build (BruteForceIndex/newBuilder (int dim) (distance-fn opts)))))
 
 (defn- build-index
   ^Index [{:keys [type] :as opts}]
@@ -250,8 +306,9 @@
 
 (defn- candidate-search
   [idx ^floats query candidate-ids k]
-  (let [metric (get-in idx [:opts :metric])
-        ^DistanceFunction distance-fn (metric-distance-fn metric)]
+  (let [index-opts (:opts idx)
+        metric (:metric index-opts)
+        ^DistanceFunction distance-fn (distance-fn index-opts)]
     (->> candidate-ids
          (keep (fn [id]
                  (when-let [^VItem item (optional-item (get-optional idx id))]
@@ -259,7 +316,7 @@
                     :score (raw-score metric
                                       (.distance distance-fn query (.vector item)))
                     :metadata (get @(:metadata idx) id)})))
-         (sort-by (if (#{:cosine :dot} metric)
+         (sort-by (if (score-higher? index-opts)
                     (fn [{:keys [id score]}] [(- score) (pr-str id)])
                     (fn [{:keys [id score]}] [score (pr-str id)])))
          (take k)
@@ -336,7 +393,7 @@
                           sparse-results)]
      (hybrid/fuse dense-results sparse-results k
                   (assoc opts :dense-higher?
-                         (#{:cosine :dot} (get-in idx [:opts :metric])))))))
+                         (score-higher? (:opts idx)))))))
 
 (defn remove!
   "Removes id from the index. Returns true when an item was removed."
@@ -402,6 +459,9 @@
 (defn save
   "Saves idx into path, a directory. Creates the directory when absent. Returns path."
   [idx path]
+  (when (= :custom (get-in idx [:opts :metric]))
+    (throw (ex-info "Indexes with custom distance functions cannot be persisted"
+                    {:vector-search/error :custom-distance-not-persistable})))
   (let [dir (path-file path)
         index-file (io/file dir "index.bin")
         meta-file (io/file dir "meta.edn")]
@@ -443,6 +503,9 @@
           (edn/read-string (slurp meta-file))
           _ (when (and index-sha256 (not= index-sha256 (sha256 index-file)))
               (snapshot-mismatch! dir))
+          _custom-distance-check (when (= :custom (:metric opts))
+                                  (throw (ex-info "Indexes with custom distance functions cannot be loaded"
+                                                  {:vector-search/error :custom-distance-not-persistable})))
           type (get opts :type :hnsw)
           loaded (case type
                    :hnsw (HnswIndex/load ^File index-file ^ClassLoader loader)

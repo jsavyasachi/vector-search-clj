@@ -75,6 +75,89 @@
          (ex-data-for #(vs/index {:dim 2 :metric :taxicab}))))
   (is (= 50 (get-in (vs/index {:dim 2}) [:opts :ef]))))
 
+(deftest custom-distance-functions-use-explicit-score-direction
+  (testing "higher-is-better custom scores"
+    (let [idx (vs/index {:type :exact
+                         :dim 2
+                         :distance-fn (fn [query candidate]
+                                        (+ (* (aget ^floats query 0)
+                                              (aget ^floats candidate 0))
+                                           (* (aget ^floats query 1)
+                                              (aget ^floats candidate 1))))
+                         :score-direction :higher-is-better})]
+      (vs/add! idx :small [1.0 0.0])
+      (vs/add! idx :large [2.0 0.0])
+      (is (= [:large :small] (mapv :id (vs/search idx [1.0 0.0] 2))))
+      (is (= 2.0 (:score (first (vs/search idx [1.0 0.0] 1)))))))
+  (testing "lower-is-better custom scores"
+    (let [idx (vs/index {:type :exact
+                         :dim 2
+                         :distance-fn (fn [query candidate]
+                                        (Math/abs (- (aget ^floats query 0)
+                                                     (aget ^floats candidate 0))))
+                         :score-direction :lower-is-better})]
+      (vs/add! idx :near [1.5 0.0])
+      (vs/add! idx :far [5.0 0.0])
+      (is (= [:near :far] (mapv :id (vs/search idx [1.0 0.0] 2))))
+      (is (= 0.5 (:score (first (vs/search idx [1.0 0.0] 1))))))))
+
+(deftest custom-distance-requires-score-direction
+  (is (= {:vector-search/error :missing-score-direction}
+         (ex-data-for #(vs/index {:dim 2 :distance-fn (fn [_ _] 0.0)}))))
+  (is (= {:vector-search/error :invalid-score-direction
+          :score-direction :sideways}
+         (ex-data-for #(vs/index {:dim 2
+                                  :distance-fn (fn [_ _] 0.0)
+                                  :score-direction :sideways})))))
+
+(deftest custom-distance-configures-hnsw-comparator
+  (let [idx (vs/index {:dim 2
+                       :capacity 4
+                       :distance-fn (fn [query candidate]
+                                      (Math/abs (- (aget ^floats query 0)
+                                                   (aget ^floats candidate 0))))
+                       :score-direction :lower-is-better})]
+    (vs/add! idx :near [1.5 0.0])
+    (vs/add! idx :far [5.0 0.0])
+    (is (= [:near :far] (mapv :id (vs/search idx [1.0 0.0] 2)))))
+  (let [idx (vs/index {:dim 2
+                       :capacity 4
+                       :distance-fn (fn [query candidate]
+                                      (+ (* (aget ^floats query 0)
+                                            (aget ^floats candidate 0))
+                                         (* (aget ^floats query 1)
+                                            (aget ^floats candidate 1))))
+                       :score-direction :higher-is-better})]
+    (vs/add! idx :small [1.0 0.0])
+    (vs/add! idx :large [2.0 0.0])
+    (is (= [:large :small] (mapv :id (vs/search idx [1.0 0.0] 2))))))
+
+(deftest custom-distance-cannot-be-saved
+  (let [dir (temp-dir)]
+    (try
+      (let [idx (vs/index {:type :exact
+                           :dim 2
+                           :distance-fn (fn [_ _] 0.0)
+                           :score-direction :lower-is-better})]
+        (is (= {:vector-search/error :custom-distance-not-persistable}
+               (ex-data-for #(vs/save idx dir)))))
+      (finally
+        (delete-recursive! dir)))))
+
+(deftest load-rejects-custom-distance-snapshot-before-deserialization
+  (let [dir (temp-dir)]
+    (try
+      (let [idx (vs/index {:type :exact :dim 2})]
+        (vs/add! idx :item [1.0 0.0])
+        (vs/save idx dir)
+        (let [meta-file (File. dir "meta.edn")
+              meta (read-string (slurp meta-file))]
+          (spit meta-file (pr-str (update meta :opts assoc :metric :custom)))
+          (is (= {:vector-search/error :custom-distance-not-persistable}
+                 (ex-data-for #(vs/load-index dir))))))
+      (finally
+        (delete-recursive! dir)))))
+
 (deftest cosine-search-uses-cosine-similarity-scores
   (let [idx (vs/index {:dim 4 :metric :cosine :capacity 8})]
     (vs/add! idx :a [1.0 0.0 0.0 0.0] {:label "exact"})

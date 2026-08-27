@@ -17,13 +17,13 @@ HNSW index with metadata and save/load, over [hnswlib](https://github.com/jelmer
 deps.edn:
 
 ```clojure
-net.clojars.savya/vector-search-clj {:mvn/version "0.5.0"}
+net.clojars.savya/vector-search-clj {:mvn/version "0.6.0"}
 ```
 
 Leiningen:
 
 ```clojure
-[net.clojars.savya/vector-search-clj "0.5.0"]
+[net.clojars.savya/vector-search-clj "0.6.0"]
 ```
 
 Pure JVM - no native dependencies, no server.
@@ -65,6 +65,27 @@ Pure JVM - no native dependencies, no server.
 (def idx2 (vs/load-index "data/my-index"))
 ```
 
+Custom distance functions are also supported. The function receives two
+`float[]` values (query, candidate) and must return a number. Because hnswlib
+needs to know how to order scores, `:score-direction` is required:
+
+```clojure
+(def idx (vs/index {:dim 384
+                    :distance-fn (fn [query candidate]
+                                   ;; return a similarity or distance
+                                   ...)
+                    :score-direction :higher-is-better}))
+```
+
+Use `:higher-is-better` for similarities and `:lower-is-better` for distances.
+Custom scores are returned unchanged and results are ordered best-first. The
+seven keyword metrics remain available through `:metric` as before.
+
+Custom-distance indexes cannot be saved: arbitrary Clojure functions cannot be
+reliably reconstructed during deserialization. `vs/save` therefore fails early
+with `:custom-distance-not-persistable`; only keyword-metric indexes can be
+loaded with `vs/load-index`.
+
 Options to `index` (defaults shown):
 
 | option | default | meaning |
@@ -72,6 +93,8 @@ Options to `index` (defaults shown):
 | `:dim` | required | vector dimensionality |
 | `:type` | `:hnsw` | `:hnsw` (approximate) or `:exact` (exhaustive brute force) |
 | `:metric` | `:cosine` | `:cosine`, `:dot`, `:euclidean`, `:manhattan`, `:correlation`, `:canberra`, or `:bray-curtis` |
+| `:distance-fn` | — | custom `(fn [query candidate] score)`; requires `:score-direction` |
+| `:score-direction` | — | `:higher-is-better` or `:lower-is-better` for custom scores |
 | `:capacity` | `10000` | initial max items; grows automatically when full (`:hnsw` only) |
 | `:m` | `16` | HNSW graph degree |
 | `:ef-construction` | `200` | build-time search breadth |
@@ -144,7 +167,9 @@ Semantics:
 
 Errors are `ex-info` maps keyed `:vector-search/error`
 (`:missing-dim`, `:unknown-metric`, `:unknown-index-type`, `:invalid-option`,
-`:dim-mismatch`, `:invalid-vector`, `:index-not-found`).
+`:dim-mismatch`, `:invalid-vector`, `:index-not-found`,
+`:missing-score-direction`, `:invalid-score-direction`,
+`:invalid-distance-fn`, `:custom-distance-not-persistable`).
 
 ## Running tests
 
