@@ -71,7 +71,7 @@ Options to `index` (defaults shown):
 |---|---|---|
 | `:dim` | required | vector dimensionality |
 | `:type` | `:hnsw` | `:hnsw` (approximate) or `:exact` (exhaustive brute force) |
-| `:metric` | `:cosine` | `:cosine`, `:dot`, or `:euclidean` |
+| `:metric` | `:cosine` | `:cosine`, `:dot`, `:euclidean`, `:manhattan`, `:correlation`, `:canberra`, or `:bray-curtis` |
 | `:capacity` | `10000` | initial max items; grows automatically when full (`:hnsw` only) |
 | `:m` | `16` | HNSW graph degree |
 | `:ef-construction` | `200` | build-time search breadth |
@@ -122,8 +122,9 @@ indexed filtering.
 Semantics:
 
 - **Scores**: for `:cosine` and `:dot`, `:score` is a similarity (higher is
-  better; cosine of an exact match ≈ 1.0). For `:euclidean` it is the L2
-  distance (lower is better). Results are always ordered best-first.
+  better; cosine of an exact match ≈ 1.0). For `:euclidean`, `:manhattan`,
+  `:correlation`, `:canberra`, and `:bray-curtis`, it is a distance (lower is
+  better). Results are always ordered best-first.
 - **Vectors**: `float[]` (zero-copy) or any sequential of numbers.
 - **Ids**: any EDN-round-trippable, `Serializable` value (strings, keywords,
   numbers, ...).
