@@ -17,13 +17,13 @@ HNSW index with metadata and save/load, over [hnswlib](https://github.com/jelmer
 deps.edn:
 
 ```clojure
-net.clojars.savya/vector-search-clj {:mvn/version "0.6.0"}
+net.clojars.savya/vector-search-clj {:mvn/version "0.7.0"}
 ```
 
 Leiningen:
 
 ```clojure
-[net.clojars.savya/vector-search-clj "0.6.0"]
+[net.clojars.savya/vector-search-clj "0.7.0"]
 ```
 
 Pure JVM - no native dependencies, no server.
