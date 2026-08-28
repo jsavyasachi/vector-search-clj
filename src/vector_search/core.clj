@@ -4,7 +4,7 @@
             [vector-search.bm25 :as bm25]
             [vector-search.filter :as metadata-filter]
             [vector-search.hybrid :as hybrid])
-  (:import [com.github.jelmerk.hnswlib.core DistanceFunction DistanceFunctions Index Item SearchResult]
+  (:import [com.github.jelmerk.hnswlib.core DistanceFunction DistanceFunctions Index Item SearchResult SparseVector]
            [com.github.jelmerk.hnswlib.core.bruteforce BruteForceIndex]
            [com.github.jelmerk.hnswlib.core.hnsw HnswIndex]
            [java.io File FileOutputStream Serializable]
@@ -19,6 +19,13 @@
   (id [_] id)
   (vector [_] vec)
   (dimensions [_] (alength vec))
+  Serializable)
+
+(deftype SparseVItem [id ^SparseVector vec dimensions]
+  Item
+  (id [_] id)
+  (vector [_] vec)
+  (dimensions [_] dimensions)
   Serializable)
 
 (def ^:private vitem-class
@@ -48,6 +55,7 @@
 (defn- metric-distance-fn
   ^DistanceFunction [metric]
   (case metric
+    :sparse-dot DistanceFunctions/FLOAT_SPARSE_VECTOR_INNER_PRODUCT
     :cosine DistanceFunctions/FLOAT_COSINE_DISTANCE
     :dot DistanceFunctions/FLOAT_INNER_PRODUCT
     :euclidean DistanceFunctions/FLOAT_EUCLIDEAN_DISTANCE
@@ -77,7 +85,7 @@
   [{:keys [metric score-direction]}]
   (if (= :custom metric)
     (= :higher-is-better score-direction)
-    (#{:cosine :dot} metric)))
+    (#{:cosine :dot :sparse-dot} metric)))
 
 (defn- custom-distance-comparator
   ^Comparator [direction]
@@ -183,24 +191,46 @@
     :else (throw (ex-info "Vector must be a float array or sequence of numbers"
                           {:vector-search/error :invalid-vector}))))
 
+(defn- sparse-vector
+  ^SparseVector [idx v]
+  (let [[indices values] (if (and (map? v) (contains? v :indices) (contains? v :values))
+                           [(:indices v) (:values v)]
+                           [(keys v) (vals v)])
+        entries (sort-by first (map vector indices values))
+        indices (mapv first entries)
+        values (mapv second entries)
+        dimension (long (get-in idx [:opts :dim]))]
+    (when-not (= (count indices) (count values))
+      (throw (ex-info "Sparse vector indices and values must have equal lengths"
+                      {:vector-search/error :invalid-vector})))
+    (when-not (every? #(and (integer? %) (<= 0 % (dec dimension))) indices)
+      (throw (ex-info "Sparse vector indices must be integers within the dimension"
+                      {:vector-search/error :invalid-vector})))
+    (when-not (= (count indices) (count (distinct indices)))
+      (throw (ex-info "Sparse vector indices must be unique"
+                      {:vector-search/error :invalid-vector})))
+    (SparseVector. (int-array indices) (float-array (map float values)))))
+
 (defn- checked-vector
-  ^floats [idx v]
-  (let [^floats coerced (coerce-vector v)
+  [idx v]
+  (if (= :sparse-dot (get-in idx [:opts :metric]))
+    (sparse-vector idx v)
+    (let [^floats coerced (coerce-vector v)
         expected (long (get-in idx [:opts :dim]))
         actual (long (alength coerced))]
-    (when-not (= expected actual)
-      (throw (ex-info "Vector dimension mismatch"
-                      {:vector-search/error :dim-mismatch
-                       :expected expected
-                       :actual actual})))
-    coerced))
+      (when-not (= expected actual)
+        (throw (ex-info "Vector dimension mismatch"
+                        {:vector-search/error :dim-mismatch
+                         :expected expected
+                         :actual actual})))
+      coerced)))
 
 (defn- get-optional
   ^Optional [idx id]
   (.get ^Index (:index idx) id))
 
 (defn- optional-item
-  ^VItem [^Optional optional]
+  [^Optional optional]
   (when (.isPresent optional)
     (.get optional)))
 
@@ -224,14 +254,16 @@
   ([idx id v metadata]
    (add! idx id v metadata nil))
   ([idx id v metadata text]
-   (let [^floats vector (checked-vector idx v)
-         item (VItem. id vector)]
+   (let [vector (checked-vector idx v)
+         item (if (= :sparse-dot (get-in idx [:opts :metric]))
+                (SparseVItem. id vector (get-in idx [:opts :dim]))
+                (VItem. id vector))]
      (locking (:lock idx)
        (let [existing (optional-item (get-optional idx id))
              old-metadata (get @(:metadata idx) id)
              ^Index index (:index idx)]
          (when existing
-           (.remove index id (.version ^VItem existing)))
+           (.remove index id (.version ^Item existing)))
          (grow-if-full! idx)
          (.add index item)
          (if (nil? metadata)
@@ -276,18 +308,29 @@
     (case metric
       :cosine (- 1.0 d)
       :dot (- 1.0 d)
+      :sparse-dot (- 1.0 d)
       d)))
+
+(defn- exposed-vector
+  [idx ^Item item]
+  (if (= :sparse-dot (get-in idx [:opts :metric]))
+    (let [^SparseVector vector (.vector item)]
+      {:indices (vec (.indices vector))
+       :values (vec (.values vector))})
+    (.vector item)))
 
 (defn- result-map
   [idx ^SearchResult result]
-  (let [^VItem item (.item result)
+  (let [^Item item (.item result)
         id (.id item)]
     {:id id
      :score (raw-score (get-in idx [:opts :metric]) (.distance result))
-     :metadata (get @(:metadata idx) id)}))
+     :metadata (get @(:metadata idx) id)
+     :vector (when (= :sparse-dot (get-in idx [:opts :metric]))
+               (exposed-vector idx item))}))
 
 (defn- raw-search
-  [idx ^floats query candidate-count]
+  [idx query candidate-count]
   (mapv #(result-map idx %)
         (.findNearest ^Index (:index idx) query (int candidate-count))))
 
@@ -305,17 +348,19 @@
     (f)))
 
 (defn- candidate-search
-  [idx ^floats query candidate-ids k]
+  [idx query candidate-ids k]
   (let [index-opts (:opts idx)
         metric (:metric index-opts)
         ^DistanceFunction distance-fn (distance-fn index-opts)]
     (->> candidate-ids
          (keep (fn [id]
-                 (when-let [^VItem item (optional-item (get-optional idx id))]
+                 (when-let [^Item item (optional-item (get-optional idx id))]
                    {:id id
                     :score (raw-score metric
                                       (.distance distance-fn query (.vector item)))
-                    :metadata (get @(:metadata idx) id)})))
+                    :metadata (get @(:metadata idx) id)
+                    :vector (when (= :sparse-dot metric)
+                              (exposed-vector idx item))})))
          (sort-by (if (score-higher? index-opts)
                     (fn [{:keys [id score]}] [(- score) (pr-str id)])
                     (fn [{:keys [id score]}] [score (pr-str id)])))
@@ -341,7 +386,7 @@
      (invalid-option! :exact :ef))
    (with-query-ef
      idx opts
-     #(let [^floats query (checked-vector idx query-vec)
+     #(let [query (checked-vector idx query-vec)
             item-count (.size ^Index (:index idx))
             k (long k)]
         (cond
@@ -400,7 +445,7 @@
   [idx id]
   (locking (:lock idx)
     (if-let [existing (optional-item (get-optional idx id))]
-      (let [removed? (.remove ^Index (:index idx) id (.version ^VItem existing))]
+      (let [removed? (.remove ^Index (:index idx) id (.version ^Item existing))]
         (when removed?
           (swap! (:metadata-index idx) metadata-filter/remove-item id
                  (get @(:metadata idx) id))
@@ -412,16 +457,55 @@
 (defn get-item
   "Returns {:id .. :vector float[] .. :metadata ..} for id, or nil."
   [idx id]
-  (when-let [^VItem item (optional-item (get-optional idx id))]
+  (when-let [^Item item (optional-item (get-optional idx id))]
     (let [id (.id item)]
       {:id id
-       :vector (.vector item)
+       :vector (if (= :sparse-dot (get-in idx [:opts :metric]))
+                 (exposed-vector idx item)
+                 (.vector item))
        :metadata (get @(:metadata idx) id)})))
+
+(defn items
+  "Returns all indexed items as stable wrapper maps, sorted by ID text."
+  [idx]
+  (->> (.items ^Index (:index idx))
+       (map #(get-item idx (.id ^Item %)))
+       (sort-by (comp pr-str :id))
+       vec))
+
+(defn as-exact-index
+  "Returns an exhaustive index containing the current HNSW items.
+
+  The returned handle is a snapshot: later mutations of either handle are
+  independent. Calling this on an exact index returns that handle unchanged."
+  [idx]
+  (if (= :exact (get-in idx [:opts :type]))
+    idx
+    (let [^HnswIndex hnsw (:index idx)]
+      {:index (.asExactIndex hnsw)
+       :opts (-> (:opts idx)
+                 (assoc :type :exact)
+                 (dissoc :m :ef-construction :ef :capacity))
+       :metadata (atom @(:metadata idx))
+       :metadata-index (atom @(:metadata-index idx))
+       :bm25 (atom @(:bm25 idx))
+       :capacity (atom (.size ^Index (:index idx)))
+       :lock (Object.)})))
 
 (defn size
   "Returns the number of indexed items."
   ^long [idx]
   (.size ^Index (:index idx)))
+
+(defn find-neighbors
+  "Returns up to `k` nearest indexed items to `id`, excluding `id` itself.
+
+  Returns nil when `id` is not indexed. Results use the same maps as `search`."
+  [idx id k]
+  (when (get-item idx id)
+    (mapv #(result-map idx %)
+          (.findNeighbors ^Index (:index idx) id (int k)))))
+
 
 (defn- path-file
   ^File [path]
