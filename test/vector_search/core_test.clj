@@ -639,3 +639,45 @@
                                       {:filter {:eq [:kind :kept]}}))))))
       (finally
         (delete-recursive! dir)))))
+
+(deftest find-neighbors-returns-nearest-items-for-id
+  (let [idx (vs/index {:type :exact :dim 2 :metric :cosine})]
+    (vs/add! idx :query [1.0 0.0] {:kind :query})
+    (vs/add! idx :near [0.9 0.1] {:kind :near})
+    (vs/add! idx :far [0.0 1.0] {:kind :far})
+    (is (= [{:id :near :metadata {:kind :near}}
+            {:id :far :metadata {:kind :far}}]
+           (mapv #(select-keys % [:id :metadata])
+                 (vs/find-neighbors idx :query 2)))))
+  (let [idx (vs/index {:type :exact :dim 2})]
+    (is (nil? (vs/find-neighbors idx :missing 2)))))
+
+(deftest items-enumerates-indexed-items
+  (let [idx (vs/index {:type :exact :dim 2})]
+    (vs/add! idx :b [0.0 1.0] {:rank 2})
+    (vs/add! idx :a [1.0 0.0] {:rank 1})
+    (is (= [{:id :a :metadata {:rank 1}}
+            {:id :b :metadata {:rank 2}}]
+           (mapv #(select-keys % [:id :metadata])
+                 (vs/items idx))))))
+
+(deftest as-exact-index-views-current-hnsw-items
+  (let [idx (vs/index {:dim 2 :metric :euclidean :capacity 4})]
+    (vs/add! idx :near [1.0 1.0] {:kind :near})
+    (vs/add! idx :far [5.0 5.0] {:kind :far})
+    (let [exact (vs/as-exact-index idx)]
+      (is (= :exact (get-in exact [:opts :type])))
+      (is (= [:near :far] (mapv :id (vs/search exact [0.0 0.0] 2))))
+      (is (= {:kind :near} (:metadata (first (vs/search exact [0.0 0.0] 1))))))))
+
+(deftest sparse-dot-indexes-and-searches-sparse-vectors
+  (let [idx (vs/index {:type :exact :dim 5 :metric :sparse-dot})]
+    (vs/add! idx :close {0 1.0 3 2.0} {:kind :close})
+    (vs/add! idx :far {1 3.0} {:kind :far})
+    (let [results (vs/search idx {0 1.0 3 2.0} 2)]
+      (is (= [:close :far] (mapv :id results)))
+      (is (approx= 5.0 (:score (first results))))
+      (is (= {:indices [0 3] :values [1.0 2.0]}
+             (:vector (vs/get-item idx :close)))))
+    (is (true? (vs/remove! idx :close)))
+    (is (nil? (vs/get-item idx :close)))))

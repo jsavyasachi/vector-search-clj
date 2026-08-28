@@ -4,6 +4,13 @@ All notable changes to this project are documented here. Format follows [Keep a 
 
 ## [Unreleased]
 
+### Added
+
+- Added nearest-neighbor lookup by an existing item ID with `find-neighbors`.
+- Added `items` for enumerating indexed items without exposing hnswlib objects.
+- Added `as-exact-index` for an exhaustive snapshot of an HNSW index.
+- Added native sparse-vector inner-product indexes with `:sparse-dot`.
+
 ## [0.6.0] - 2026-08-27
 
 ### Added

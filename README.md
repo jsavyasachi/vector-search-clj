@@ -65,6 +65,19 @@ Pure JVM - no native dependencies, no server.
 (def idx2 (vs/load-index "data/my-index"))
 ```
 
+To find neighbors of an item already in the index, use its ID directly. The
+queried item is excluded from the results; a missing ID returns `nil`.
+
+```clojure
+(vs/find-neighbors idx :document-1 10)
+```
+
+Use `vs/items` to enumerate the indexed item maps in stable ID order.
+
+For an exhaustive snapshot of an HNSW index, use `vs/as-exact-index`. The
+returned handle contains the current items and is independent of later
+mutations to the original index.
+
 Custom distance functions are also supported. The function receives two
 `float[]` values (query, candidate) and must return a number. Because hnswlib
 needs to know how to order scores, `:score-direction` is required:
@@ -92,7 +105,7 @@ Options to `index` (defaults shown):
 |---|---|---|
 | `:dim` | required | vector dimensionality |
 | `:type` | `:hnsw` | `:hnsw` (approximate) or `:exact` (exhaustive brute force) |
-| `:metric` | `:cosine` | `:cosine`, `:dot`, `:euclidean`, `:manhattan`, `:correlation`, `:canberra`, or `:bray-curtis` |
+| `:metric` | `:cosine` | `:cosine`, `:dot`, `:sparse-dot`, `:euclidean`, `:manhattan`, `:correlation`, `:canberra`, or `:bray-curtis` |
 | `:distance-fn` | — | custom `(fn [query candidate] score)`; requires `:score-direction` |
 | `:score-direction` | — | `:higher-is-better` or `:lower-is-better` for custom scores |
 | `:capacity` | `10000` | initial max items; grows automatically when full (`:hnsw` only) |
@@ -144,11 +157,14 @@ indexed filtering.
 
 Semantics:
 
-- **Scores**: for `:cosine` and `:dot`, `:score` is a similarity (higher is
+- **Scores**: for `:cosine`, `:dot`, and `:sparse-dot`, `:score` is a similarity (higher is
   better; cosine of an exact match ≈ 1.0). For `:euclidean`, `:manhattan`,
   `:correlation`, `:canberra`, and `:bray-curtis`, it is a distance (lower is
   better). Results are always ordered best-first.
-- **Vectors**: `float[]` (zero-copy) or any sequential of numbers.
+- **Vectors**: dense indexes accept `float[]` (zero-copy) or any sequential of
+  numbers. A `:sparse-dot` index accepts either `{dimension-index value}` maps
+  or `{:indices [...] :values [...]}` maps; indices must be unique integers in
+  the configured dimension. Sparse item maps expose the latter representation.
 - **Ids**: any EDN-round-trippable, `Serializable` value (strings, keywords,
   numbers, ...).
 - **BM25 text**: optional fifth argument to `add!`, or `:text` in an
