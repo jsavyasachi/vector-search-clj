@@ -36,6 +36,13 @@
   ^File []
   (.toFile (Files/createTempDirectory "vector-search-test-" (make-array java.nio.file.attribute.FileAttribute 0))))
 
+(defn snapshot-file
+  ^File [^File dir name]
+  (let [pointer (File. dir "CURRENT")]
+    (if (.isFile pointer)
+      (File. (File. dir (slurp pointer)) name)
+      (File. dir name))))
+
 (defn comparable-results
   [results]
   (mapv #(update % :score double) results))
@@ -150,7 +157,7 @@
       (let [idx (vs/index {:type :exact :dim 2})]
         (vs/add! idx :item [1.0 0.0])
         (vs/save idx dir)
-        (let [meta-file (File. dir "meta.edn")
+        (let [meta-file (snapshot-file dir "meta.edn")
               meta (read-string (slurp meta-file))]
           (spit meta-file (pr-str (update meta :opts assoc :metric :custom)))
           (is (= {:vector-search/error :custom-distance-not-persistable}
@@ -411,7 +418,7 @@
         (vs/add! idx :a [1.0 0.0] {:label "a"})
         (vs/add! idx :b [0.0 1.0] {:label "b"})
         (vs/save idx dir)
-        (let [meta-file (File. dir "meta.edn")
+        (let [meta-file (snapshot-file dir "meta.edn")
               meta (read-string (slurp meta-file))]
           (spit meta-file (pr-str (update meta :opts dissoc :type))))
         (let [loaded (vs/load-index dir)]
@@ -465,21 +472,79 @@
       (let [idx (vs/index {:type :exact :dim 2})]
         (vs/add! idx :first [1.0 0.0] {:snapshot :first})
         (vs/save idx dir)
+        (is (.isFile (File. dir "CURRENT")))
         (vs/add! idx :second [0.0 1.0] {:snapshot :second})
         (let [moves (atom 0)]
           (with-redefs [vector-search.core/atomic-move!
                         (fn [from to]
-                          (if (= 1 (swap! moves inc))
-                            (Files/move (.toPath ^File from) (.toPath ^File to)
-                                        (into-array java.nio.file.CopyOption
-                                                    [java.nio.file.StandardCopyOption/REPLACE_EXISTING]))
-                            (throw (ex-info "publication failed" {}))))]
-            (is (thrown? clojure.lang.ExceptionInfo (vs/save idx dir)))))
+                          (swap! moves inc)
+                          (throw (ex-info "publication failed" {})))]
+            (is (thrown? clojure.lang.ExceptionInfo (vs/save idx dir)))
+            (is (= 1 @moves)))
+          (is (= [:first]
+                 (mapv :id (vs/items (vs/load-index dir)))))))
+      (finally
+        (delete-recursive! dir)))))
+
+(deftest interrupted-save-before-pointer-commit-preserves-previous-snapshot
+  (let [dir (temp-dir)]
+    (try
+      (let [idx (vs/index {:type :exact :dim 2})]
+        (vs/add! idx :first [1.0 0.0] {:snapshot :first})
+        (vs/save idx dir)
+        (vs/add! idx :second [0.0 1.0] {:snapshot :second})
+        (let [pointer-source (atom nil)]
+          (with-redefs [vector-search.core/atomic-move!
+                        (fn [from _]
+                          (reset! pointer-source from)
+                          (throw (ex-info "process died before pointer commit" {})))]
+            (is (thrown? clojure.lang.ExceptionInfo (vs/save idx dir))))
+          (is (some? @pointer-source))
+          (is (.isFile ^File @pointer-source)))
         (is (= [:first]
-               (try
-                 (mapv :id (vs/items (vs/load-index dir)))
-                 (catch clojure.lang.ExceptionInfo _
-                   ::unloadable)))))
+               (mapv :id (vs/items (vs/load-index dir)))))
+        (is (= {:snapshot :first}
+               (:metadata (vs/get-item (vs/load-index dir) :first)))))
+      (finally
+        (delete-recursive! dir)))))
+
+(deftest legacy-bare-snapshot-loads-without-pointer
+  (let [dir (temp-dir)
+        source (temp-dir)]
+    (try
+      (let [idx (vs/index {:type :exact :dim 2})]
+        (vs/add! idx :legacy [1.0 0.0] {:snapshot :legacy})
+        (vs/save idx source)
+        (let [generation-file (File. source "CURRENT")
+              source-generation (if (.isFile generation-file)
+                                  (File. source (slurp generation-file))
+                                  source)]
+          (Files/copy (.toPath (File. source-generation "index.bin"))
+                      (.toPath (File. dir "index.bin"))
+                      (make-array java.nio.file.CopyOption 0))
+          (Files/copy (.toPath (File. source-generation "meta.edn"))
+                      (.toPath (File. dir "meta.edn"))
+                      (make-array java.nio.file.CopyOption 0)))
+        (is (= [:legacy]
+               (mapv :id (vs/items (vs/load-index dir))))))
+      (finally
+        (delete-recursive! dir)
+        (delete-recursive! source)))))
+
+(deftest concurrent-saves-to-one-directory-publish-complete-snapshots
+  (let [dir (temp-dir)
+        left (vs/index {:type :exact :dim 2})
+        right (vs/index {:type :exact :dim 2})]
+    (try
+      (vs/add! left :left [1.0 0.0] {:snapshot :left})
+      (vs/add! right :right [0.0 1.0] {:snapshot :right})
+      (let [futures [(future (vs/save left dir))
+                     (future (vs/save right dir))]]
+        (doseq [future futures] @future))
+      (let [loaded (vs/load-index dir)
+            ids (set (map :id (vs/items loaded)))]
+        (is (or (= #{:left} ids) (= #{:right} ids))))
+      (is (empty? @(deref (ns-resolve 'vector-search.core 'publication-locks))))
       (finally
         (delete-recursive! dir)))))
 
@@ -493,8 +558,8 @@
         (vs/add! second-index :second [0.0 1.0] {:snapshot :second})
         (vs/save first-index dir)
         (vs/save second-index other-dir)
-        (spit (File. dir "meta.edn")
-              (slurp (File. other-dir "meta.edn")))
+        (spit (snapshot-file dir "meta.edn")
+              (slurp (snapshot-file other-dir "meta.edn")))
         (is (= :snapshot-mismatch
                (:vector-search/error (ex-data-for #(vs/load-index dir))))))
       (finally
@@ -507,7 +572,7 @@
       (let [idx (vs/index {:type :exact :dim 2})]
         (vs/add! idx :item [1.0 0.0])
         (vs/save idx dir)
-        (let [meta-file (File. dir "meta.edn")
+        (let [meta-file (snapshot-file dir "meta.edn")
               meta (read-string (slurp meta-file))]
           (spit meta-file (pr-str (dissoc meta :index-sha256)))
           (is (= :snapshot-mismatch

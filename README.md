@@ -60,7 +60,7 @@ Pure JVM - no native dependencies, no server.
 (vs/remove! idx "chunk-1")    ;; => true
 (vs/size idx)                 ;; => 2
 
-;; persistence: a directory with hnswlib's index.bin + an EDN sidecar
+;; persistence: a directory with a durable generation and CURRENT pointer
 (vs/save idx "data/my-index")
 (def idx2 (vs/load-index "data/my-index"))
 ```
@@ -119,7 +119,8 @@ per query, with no capacity or tuning knobs. If you give `:m`,
 `:invalid-option`. Use `:exact` as ground truth for recall tests, or for a
 small corpus. The rest of the API behaves the same way, including `:filter`,
 metadata, and `save`/`load-index`. `meta.edn` records the index type. An older
-save loads as `:hnsw`.
+save loads as `:hnsw`; legacy directories containing bare `index.bin` and
+`meta.edn` remain supported.
 
 ```clojure
 (def exact (vs/index {:dim 384 :type :exact}))

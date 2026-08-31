@@ -8,7 +8,8 @@
            [com.github.jelmerk.hnswlib.core.bruteforce BruteForceIndex]
            [com.github.jelmerk.hnswlib.core.hnsw HnswIndex]
            [java.io File FileOutputStream Serializable]
-           [java.nio.file CopyOption Files StandardCopyOption]
+           [java.nio.channels FileChannel]
+           [java.nio.file CopyOption Files StandardCopyOption StandardOpenOption]
            [java.security MessageDigest]
            [java.util Comparator Optional]))
 
@@ -542,84 +543,139 @@
 
 (def ^:private publication-locks (atom {}))
 
-(defn- publication-lock
+(defn- acquire-publication-lock
   [^File dir]
   (let [path (.getCanonicalPath dir)]
-    (get (swap! publication-locks #(if (contains? % path)
-                                     %
-                                     (assoc % path (Object.))))
-         path)))
+    (loop []
+      (let [locks @publication-locks
+            entry (get locks path)
+            next-locks (assoc locks path {:lock (or (:lock entry) (Object.))
+                                          :holders (inc (long (or (:holders entry) 0)))})]
+        (if (compare-and-set! publication-locks locks next-locks)
+          [path (:lock (get next-locks path))]
+          (recur))))))
 
-(defn- move-file!
-  [^File from ^File to]
-  (Files/move (.toPath from) (.toPath to)
-              (into-array CopyOption [StandardCopyOption/ATOMIC_MOVE
-                                      StandardCopyOption/REPLACE_EXISTING])))
+(defn- release-publication-lock!
+  [path lock]
+  (swap! publication-locks
+         (fn [locks]
+           (let [entry (get locks path)]
+             (if (and entry (identical? lock (:lock entry)))
+               (if (= 1 (:holders entry))
+                 (dissoc locks path)
+                 (assoc locks path (update entry :holders dec)))
+               locks)))))
 
-(defn- restore-file!
-  [^File backup ^File target]
-  (when (.isFile backup)
-    (when (.exists target)
-      (.delete target))
-    (move-file! backup target)))
+(defn- with-publication-lock
+  [^File dir f]
+  (let [[path lock] (acquire-publication-lock dir)]
+    (try
+      (locking lock (f))
+      (finally
+        (release-publication-lock! path lock)))))
+
+(defn- force-file!
+  [^File file]
+  (try
+    (with-open [out (FileOutputStream. file true)]
+      (.sync (.getFD out)))
+    (catch java.io.IOException _
+      ;; Some filesystems reject fsync even though the file is writable.
+      nil))
+  file)
+
+(defn- force-directory!
+  [^File dir]
+  (try
+    (with-open [channel (FileChannel/open (.toPath dir)
+                                         (into-array StandardOpenOption
+                                                     [StandardOpenOption/READ]))]
+      (.force channel true))
+    (catch Exception _
+      ;; Directory fsync is not supported on every platform/filesystem.
+      nil))
+  dir)
+
+(defn- next-generation-number
+  ^long [^File dir]
+  (let [generation-numbers (keep (fn [^File child]
+                                  (when (and (.isDirectory child)
+                                             (re-matches #"generation-[0-9]+"
+                                                         (.getName child)))
+                                    (Long/parseLong (subs (.getName child) 11))))
+                                (or (.listFiles dir) (make-array File 0)))]
+    (inc (long (if (seq generation-numbers)
+                 (apply max generation-numbers)
+                 0)))))
+
+(defn- generation-name
+  [number]
+  (format "generation-%020d" number))
+
+(defn- snapshot-directory
+  ^File [^File dir]
+  (let [pointer (io/file dir "CURRENT")]
+    (if (.isFile pointer)
+      (let [generation (.trim (slurp pointer))]
+        (if (re-matches #"generation-[0-9]+" generation)
+          (io/file dir generation)
+          (missing-index! dir)))
+      dir)))
 
 (defn save
-  "Saves idx into path, a directory. Creates the directory when absent. Returns path."
+  "Saves idx into path using a durable generation and CURRENT pointer.
+  Creates the directory when absent. Returns path."
   [idx path]
   (when (= :custom (get-in idx [:opts :metric]))
     (throw (ex-info "Indexes with custom distance functions cannot be persisted"
                     {:vector-search/error :custom-distance-not-persistable})))
-  (let [dir (path-file path)
-        index-file (io/file dir "index.bin")
-        meta-file (io/file dir "meta.edn")]
+  (let [dir (path-file path)]
     (.mkdirs dir)
-    (let [index-temp (File/createTempFile "index-" ".tmp" dir)
-          meta-temp (File/createTempFile "meta-" ".tmp" dir)]
-      (try
-        (locking (:lock idx)
-          (with-open [out (FileOutputStream. ^File index-temp)]
-            (.save ^Index (:index idx) out))
-          (spit meta-temp
-                (pr-str {:opts (:opts idx)
-                         :capacity @(:capacity idx)
-                         :metadata @(:metadata idx)
-                         :metadata-index @(:metadata-index idx)
-                         :bm25 @(:bm25 idx)
-                         :index-sha256 (sha256 index-temp)}))
-          (locking (publication-lock dir)
-            (let [index-backup (File/createTempFile "index-backup-" ".tmp" dir)
-                  meta-backup (File/createTempFile "meta-backup-" ".tmp" dir)
-                  backed-up-index? (.isFile index-file)
-                  backed-up-meta? (.isFile meta-file)]
+    (with-publication-lock
+      dir
+      (fn []
+        (let [generation (generation-name (next-generation-number dir))
+              generation-dir (io/file dir generation)
+              index-file (io/file generation-dir "index.bin")
+              meta-file (io/file generation-dir "meta.edn")
+              pointer-temp (io/file dir (str "CURRENT." generation ".tmp"))]
+          (.mkdir generation-dir)
+          (locking (:lock idx)
+            (with-open [out (FileOutputStream. ^File index-file)]
+              (.save ^Index (:index idx) out)
               (try
-                (when backed-up-index?
-                  (move-file! index-file index-backup))
-                (when backed-up-meta?
-                  (move-file! meta-file meta-backup))
-                (atomic-move! index-temp index-file)
-                (atomic-move! meta-temp meta-file)
-                (catch Throwable error
-                  (restore-file! index-backup index-file)
-                  (restore-file! meta-backup meta-file)
-                  (throw error))
-                (finally
-                  (.delete index-backup)
-                  (.delete meta-backup))))))
-        (finally
-          (.delete index-temp)
-          (.delete meta-temp))))
+                (.sync (.getFD out))
+                (catch java.io.IOException _
+                  nil)))
+            (spit meta-file
+                  (pr-str {:opts (:opts idx)
+                           :capacity @(:capacity idx)
+                           :metadata @(:metadata idx)
+                           :metadata-index @(:metadata-index idx)
+                           :bm25 @(:bm25 idx)
+                           :index-sha256 (sha256 index-file)}))
+            (force-file! meta-file))
+          (force-directory! generation-dir)
+          (spit pointer-temp generation)
+          (force-file! pointer-temp)
+          (atomic-move! pointer-temp (io/file dir "CURRENT"))
+          (force-directory! dir)
+          (.delete pointer-temp))))
     path))
 
 (defn load-index
-  "Loads an index handle from path, a directory containing index.bin and meta.edn.
+  "Loads an index handle from path. New snapshots use CURRENT to select a
+  generation directory; legacy directories may contain index.bin and meta.edn
+  directly.
 
   :type in meta.edn selects :hnsw or :exact. An older save without :type loads
   as :hnsw. :exact does an exhaustive exact search, O(n) per query, with no
   tuning knobs. Use it as ground truth, or for a small corpus."
   [path]
   (let [dir (path-file path)
-        index-file (io/file dir "index.bin")
-        meta-file (io/file dir "meta.edn")]
+        snapshot-dir (snapshot-directory dir)
+        index-file (io/file snapshot-dir "index.bin")
+        meta-file (io/file snapshot-dir "meta.edn")]
     (when-not (and (.isFile ^File index-file) (.isFile ^File meta-file))
       (missing-index! dir))
     (let [loader (.getClassLoader ^Class vitem-class)
