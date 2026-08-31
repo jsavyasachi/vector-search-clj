@@ -4,6 +4,24 @@ All notable changes to this project are documented here. Format follows [Keep a 
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-30
+
+### Changed
+
+- **Breaking change:** Saved indexes now use a durable snapshot format that
+  0.7.0 and earlier cannot read. Callers must upgrade to 0.8.0 and recreate or
+  re-save indexes before sharing them with older deployments; existing legacy
+  directories remain readable.
+
+### Fixed
+
+- Interrupted or concurrent saves no longer destroy the last complete snapshot
+  or combine files from different snapshots.
+- Loading now rejects metadata without an `:index-sha256` checksum instead of
+  accepting an unverified index/metadata pair.
+- Sparse vectors with different numbers of indices and values now fail with
+  `:vector-search/error :invalid-vector` instead of being silently truncated.
+
 ## [0.7.0] - 2026-08-27
 
 ### Added
