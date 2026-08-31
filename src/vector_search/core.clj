@@ -540,6 +540,29 @@
               (into-array CopyOption [StandardCopyOption/ATOMIC_MOVE
                                       StandardCopyOption/REPLACE_EXISTING])))
 
+(def ^:private publication-locks (atom {}))
+
+(defn- publication-lock
+  [^File dir]
+  (let [path (.getCanonicalPath dir)]
+    (get (swap! publication-locks #(if (contains? % path)
+                                     %
+                                     (assoc % path (Object.))))
+         path)))
+
+(defn- move-file!
+  [^File from ^File to]
+  (Files/move (.toPath from) (.toPath to)
+              (into-array CopyOption [StandardCopyOption/ATOMIC_MOVE
+                                      StandardCopyOption/REPLACE_EXISTING])))
+
+(defn- restore-file!
+  [^File backup ^File target]
+  (when (.isFile backup)
+    (when (.exists target)
+      (.delete target))
+    (move-file! backup target)))
+
 (defn save
   "Saves idx into path, a directory. Creates the directory when absent. Returns path."
   [idx path]
@@ -562,9 +585,26 @@
                          :metadata @(:metadata idx)
                          :metadata-index @(:metadata-index idx)
                          :bm25 @(:bm25 idx)
-                         :index-sha256 (sha256 index-temp)})))
-        (atomic-move! index-temp index-file)
-        (atomic-move! meta-temp meta-file)
+                         :index-sha256 (sha256 index-temp)}))
+          (locking (publication-lock dir)
+            (let [index-backup (File/createTempFile "index-backup-" ".tmp" dir)
+                  meta-backup (File/createTempFile "meta-backup-" ".tmp" dir)
+                  backed-up-index? (.isFile index-file)
+                  backed-up-meta? (.isFile meta-file)]
+              (try
+                (when backed-up-index?
+                  (move-file! index-file index-backup))
+                (when backed-up-meta?
+                  (move-file! meta-file meta-backup))
+                (atomic-move! index-temp index-file)
+                (atomic-move! meta-temp meta-file)
+                (catch Throwable error
+                  (restore-file! index-backup index-file)
+                  (restore-file! meta-backup meta-file)
+                  (throw error))
+                (finally
+                  (.delete index-backup)
+                  (.delete meta-backup))))))
         (finally
           (.delete index-temp)
           (.delete meta-temp))))

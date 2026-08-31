@@ -459,6 +459,30 @@
       (finally
         (delete-recursive! dir)))))
 
+(deftest failed-save-preserves-previous-snapshot
+  (let [dir (temp-dir)]
+    (try
+      (let [idx (vs/index {:type :exact :dim 2})]
+        (vs/add! idx :first [1.0 0.0] {:snapshot :first})
+        (vs/save idx dir)
+        (vs/add! idx :second [0.0 1.0] {:snapshot :second})
+        (let [moves (atom 0)]
+          (with-redefs [vector-search.core/atomic-move!
+                        (fn [from to]
+                          (if (= 1 (swap! moves inc))
+                            (Files/move (.toPath ^File from) (.toPath ^File to)
+                                        (into-array java.nio.file.CopyOption
+                                                    [java.nio.file.StandardCopyOption/REPLACE_EXISTING]))
+                            (throw (ex-info "publication failed" {}))))]
+            (is (thrown? clojure.lang.ExceptionInfo (vs/save idx dir)))))
+        (is (= [:first]
+               (try
+                 (mapv :id (vs/items (vs/load-index dir)))
+                 (catch clojure.lang.ExceptionInfo _
+                   ::unloadable)))))
+      (finally
+        (delete-recursive! dir)))))
+
 (deftest load-index-rejects-torn-snapshot
   (let [dir (temp-dir)
         other-dir (temp-dir)]
