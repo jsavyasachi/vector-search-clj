@@ -625,7 +625,9 @@
     (let [loader (.getClassLoader ^Class vitem-class)
           {:keys [opts capacity metadata metadata-index bm25 index-sha256]}
           (edn/read-string (slurp meta-file))
-          _ (when (and index-sha256 (not= index-sha256 (sha256 index-file)))
+          verified-index-sha256 (sha256 index-file)
+          _ (when (or (nil? index-sha256)
+                      (not= index-sha256 verified-index-sha256))
               (snapshot-mismatch! dir))
           _custom-distance-check (when (= :custom (:metric opts))
                                   (throw (ex-info "Indexes with custom distance functions cannot be loaded"
@@ -636,10 +638,7 @@
                    :exact (BruteForceIndex/load ^File index-file ^ClassLoader loader)
                    (throw (ex-info "Unknown vector-search index type"
                                    {:vector-search/error :unknown-index-type
-                                    :type type})))
-          verified-index-sha256 (when index-sha256 (sha256 index-file))]
-      (when (and index-sha256 (not= index-sha256 verified-index-sha256))
-        (snapshot-mismatch! dir))
+                                    :type type})))]
       {:index loaded
        :opts (assoc opts :type type)
        :metadata (atom metadata)

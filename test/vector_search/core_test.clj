@@ -501,6 +501,20 @@
         (delete-recursive! dir)
         (delete-recursive! other-dir)))))
 
+(deftest load-index-rejects-snapshot-without-checksum
+  (let [dir (temp-dir)]
+    (try
+      (let [idx (vs/index {:type :exact :dim 2})]
+        (vs/add! idx :item [1.0 0.0])
+        (vs/save idx dir)
+        (let [meta-file (File. dir "meta.edn")
+              meta (read-string (slurp meta-file))]
+          (spit meta-file (pr-str (dissoc meta :index-sha256)))
+          (is (= :snapshot-mismatch
+                 (:vector-search/error (ex-data-for #(vs/load-index dir)))))))
+      (finally
+        (delete-recursive! dir)))))
+
 (deftest filtered-search
   (let [idx (vs/index {:dim 2 :metric :cosine :capacity 100})]
     (doseq [i (range 20)]
