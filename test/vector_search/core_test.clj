@@ -43,6 +43,13 @@
       (File. (File. dir (slurp pointer)) name)
       (File. dir name))))
 
+(defn generation-directories
+  [^File dir]
+  (->> (.listFiles dir)
+       (filter #(and (.isDirectory ^File %)
+                     (re-matches #"generation-[0-9]+" (.getName ^File %))))
+       (sort-by #(.getName ^File %))))
+
 (defn comparable-results
   [results]
   (mapv #(update % :score double) results))
@@ -465,6 +472,73 @@
         (is (= 2 (vs/size (vs/load-index dir)))))
       (finally
         (delete-recursive! dir)))))
+
+(deftest repeated-saves-retain-live-generation-and-predecessor
+  (let [dir (temp-dir)]
+    (try
+      (let [idx (vs/index {:type :exact :dim 2})]
+        (doseq [n (range 5)]
+          (vs/add! idx n [(float n) 0.0])
+          (vs/save idx dir))
+        (is (= 2 (count (generation-directories dir))))
+        (is (= 5 (vs/size (vs/load-index dir)))))
+      (finally
+        (delete-recursive! dir)))))
+
+(deftest cleanup-leaves-current-data-loadable
+  (let [dir (temp-dir)]
+    (try
+      (let [idx (vs/index {:type :exact :dim 2})]
+        (vs/add! idx :first [1.0 0.0])
+        (vs/save idx dir)
+        (vs/add! idx :second [0.0 1.0])
+        (vs/save idx dir)
+        (vs/add! idx :third [1.0 1.0])
+        (vs/save idx dir)
+        (is (= #{:first :second :third}
+               (set (map :id (vs/items (vs/load-index dir)))))))
+      (finally
+        (delete-recursive! dir)))))
+
+(deftest cleanup-failure-does-not-fail-save
+  (let [dir (temp-dir)]
+    (try
+      (let [idx (vs/index {:type :exact :dim 2})]
+        (vs/add! idx :first [1.0 0.0])
+        (vs/save idx dir)
+        (vs/add! idx :second [0.0 1.0])
+        (with-redefs [vector-search.core/cleanup-superseded-generations!
+                      (fn [_ _]
+                        (throw (java.io.IOException. "cleanup failed")))]
+          (is (= dir (vs/save idx dir))))
+        (is (= #{:first :second}
+               (set (map :id (vs/items (vs/load-index dir)))))))
+      (finally
+        (delete-recursive! dir)))))
+
+(deftest save-migrating-legacy-snapshot-preserves-bare-files
+  (let [dir (temp-dir)
+        source (temp-dir)]
+    (try
+      (let [idx (vs/index {:type :exact :dim 2})]
+        (vs/add! idx :legacy [1.0 0.0])
+        (vs/save idx source)
+        (let [source-generation (File. source (slurp (File. source "CURRENT")))]
+          (Files/copy (.toPath (File. source-generation "index.bin"))
+                      (.toPath (File. dir "index.bin"))
+                      (make-array java.nio.file.CopyOption 0))
+          (Files/copy (.toPath (File. source-generation "meta.edn"))
+                      (.toPath (File. dir "meta.edn"))
+                      (make-array java.nio.file.CopyOption 0)))
+        (spit (File. dir "user-file") "keep")
+        (vs/save (vs/load-index dir) dir)
+        (is (.isFile (File. dir "index.bin")))
+        (is (.isFile (File. dir "meta.edn")))
+        (is (.isFile (File. dir "user-file")))
+        (is (= [:legacy] (mapv :id (vs/items (vs/load-index dir))))))
+      (finally
+        (delete-recursive! dir)
+        (delete-recursive! source)))))
 
 (deftest failed-save-preserves-previous-snapshot
   (let [dir (temp-dir)]

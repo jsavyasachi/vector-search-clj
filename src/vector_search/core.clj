@@ -612,6 +612,42 @@
   [number]
   (format "generation-%020d" number))
 
+(defn- generation-number
+  ^long [generation]
+  (let [name (if (instance? File generation)
+               (.getName ^File generation)
+               generation)]
+    (Long/parseLong (subs name 11))))
+
+(defn- delete-generation-directory!
+  [^File generation-dir]
+  (doseq [^File file (reverse (file-seq generation-dir))]
+    (.delete file)))
+
+(defn- cleanup-superseded-generations!
+  [^File dir live-generation]
+  (let [live-number (generation-number live-generation)
+        generations (->> (or (.listFiles dir) (make-array File 0))
+                         (filter (fn [^File child]
+                                   (and (.isDirectory child)
+                                        (re-matches #"generation-[0-9]+"
+                                                    (.getName child)))))
+                         (sort-by generation-number >))
+        previous-number (some (fn [^File generation-dir]
+                                (let [number (generation-number generation-dir)]
+                                  (when (< number live-number)
+                                    number)))
+                              generations)]
+    (doseq [^File generation-dir generations]
+      (let [number (generation-number generation-dir)]
+        (when (and (not= number live-number)
+                   (not= number previous-number))
+          (try
+            (delete-generation-directory! generation-dir)
+            (catch Exception _
+              ;; A failed cleanup must not affect the committed snapshot.
+              nil)))))))
+
 (defn- snapshot-directory
   ^File [^File dir]
   (let [pointer (io/file dir "CURRENT")]
@@ -660,7 +696,12 @@
           (force-file! pointer-temp)
           (atomic-move! pointer-temp (io/file dir "CURRENT"))
           (force-directory! dir)
-          (.delete pointer-temp))))
+          (.delete pointer-temp)
+          (try
+            (cleanup-superseded-generations! dir generation)
+            (catch Exception _
+              ;; Cleanup is best-effort after publication has succeeded.
+              nil)))))
     path))
 
 (defn load-index
