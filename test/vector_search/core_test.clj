@@ -719,3 +719,10 @@
              (:vector (vs/get-item idx :close)))))
     (is (true? (vs/remove! idx :close)))
     (is (nil? (vs/get-item idx :close)))))
+
+(deftest sparse-vector-rejects-mismatched-indices-and-values
+  (let [idx (vs/index {:type :exact :dim 5 :metric :sparse-dot})]
+    (is (= :invalid-vector
+           (:vector-search/error
+            (ex-data-for #(vs/add! idx :invalid {:indices [0 1]
+                                                 :values [1.0]})))))))

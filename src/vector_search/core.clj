@@ -196,13 +196,13 @@
   (let [[indices values] (if (and (map? v) (contains? v :indices) (contains? v :values))
                            [(:indices v) (:values v)]
                            [(keys v) (vals v)])
+        _ (when-not (= (count indices) (count values))
+            (throw (ex-info "Sparse vector indices and values must have equal lengths"
+                            {:vector-search/error :invalid-vector})))
         entries (sort-by first (map vector indices values))
         indices (mapv first entries)
         values (mapv second entries)
         dimension (long (get-in idx [:opts :dim]))]
-    (when-not (= (count indices) (count values))
-      (throw (ex-info "Sparse vector indices and values must have equal lengths"
-                      {:vector-search/error :invalid-vector})))
     (when-not (every? #(and (integer? %) (<= 0 % (dec dimension))) indices)
       (throw (ex-info "Sparse vector indices must be integers within the dimension"
                       {:vector-search/error :invalid-vector})))
