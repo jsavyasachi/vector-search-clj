@@ -550,7 +550,7 @@
         (vs/add! idx :second [0.0 1.0] {:snapshot :second})
         (let [moves (atom 0)]
           (with-redefs [vector-search.core/atomic-move!
-                        (fn [from to]
+                        (fn [_from _to]
                           (swap! moves inc)
                           (throw (ex-info "publication failed" {})))]
             (is (thrown? clojure.lang.ExceptionInfo (vs/save idx dir)))
