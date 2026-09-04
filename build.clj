@@ -23,12 +23,12 @@
                 :version version
                 :basis @basis
                 :src-dirs ["src"]
-                :scm {:url "https://github.com/jsavyasachi/vector-search-clj"
-                      :connection "scm:git:https://github.com/jsavyasachi/vector-search-clj.git"
-                      :developerConnection "scm:git:ssh://git@github.com/jsavyasachi/vector-search-clj.git"
+                :scm {:url "https://github.com/savyalabs/vector-search-clj"
+                      :connection "scm:git:https://github.com/savyalabs/vector-search-clj.git"
+                      :developerConnection "scm:git:ssh://git@github.com/savyalabs/vector-search-clj.git"
                       :tag (str "v" version)}
                 :pom-data [[:description "Embedded approximate-nearest-neighbor vector search for Clojure: an in-process ANN index."]
-                           [:url "https://github.com/jsavyasachi/vector-search-clj"]
+                           [:url "https://github.com/savyalabs/vector-search-clj"]
                            [:licenses
                             [:license
                              [:name "Eclipse Public License 2.0"]

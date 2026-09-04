@@ -2,7 +2,7 @@
 
 [![Clojars Project](https://img.shields.io/clojars/v/net.clojars.savya/vector-search-clj.svg)](https://clojars.org/net.clojars.savya/vector-search-clj)
 [![cljdoc](https://cljdoc.org/badge/net.clojars.savya/vector-search-clj)](https://cljdoc.org/d/net.clojars.savya/vector-search-clj/CURRENT)
-[![test](https://github.com/jsavyasachi/vector-search-clj/actions/workflows/test.yml/badge.svg)](https://github.com/jsavyasachi/vector-search-clj/actions/workflows/test.yml)
+[![test](https://github.com/savyalabs/vector-search-clj/actions/workflows/test.yml/badge.svg)](https://github.com/savyalabs/vector-search-clj/actions/workflows/test.yml)
 
 Embedded approximate-nearest-neighbor vector search for Clojure: an in-process
 HNSW index with metadata and save/load, over [hnswlib](https://github.com/jelmerk/hnswlib).
